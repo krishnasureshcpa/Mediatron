@@ -139,21 +139,27 @@ struct ContentView: View {
     @EnvironmentObject var manager: MediaProcessingManager
     @State private var showPalette = false
     @State private var sidebarWidth: CGFloat = 280
-    
+    @AppStorage("bgTheme") private var bgThemeRaw = BackgroundTheme.mesh.rawValue
+
     var body: some View {
+        let currentTheme = BackgroundTheme(rawValue: bgThemeRaw) ?? .mesh
+
         ZStack {
-            if manager.phase == .welcome {
-                WelcomeView()
-            } else {
-                HSplitView {
-                    SidebarView()
-                        .frame(minWidth: 240, idealWidth: 270, maxWidth: 320)
-                    
-                    MainAreaView()
-                        .frame(minWidth: 700)
+            // App-wide animated background
+            Group {
+                if manager.phase == .welcome {
+                    WelcomeView(backgroundTheme: currentTheme, onCycleTheme: cycleTheme)
+                } else {
+                    HSplitView {
+                        SidebarView()
+                            .frame(minWidth: 240, idealWidth: 270, maxWidth: 320)
+
+                        MainAreaView(backgroundTheme: currentTheme)
+                            .frame(minWidth: 700)
+                    }
                 }
             }
-            
+
             // ⌘K Command Palette
             if showPalette {
                 Color.black.opacity(0.4).ignoresSafeArea().onTapGesture { showPalette = false }
@@ -171,8 +177,20 @@ struct ContentView: View {
                     showPalette.toggle()
                     return nil
                 }
+                if event.modifierFlags.contains(.command) && event.keyCode == 47 { // /
+                    cycleTheme()
+                    return nil
+                }
                 return event
             }
         }
+    }
+
+    private func cycleTheme() {
+        let all = BackgroundTheme.allCases
+        let current = BackgroundTheme(rawValue: bgThemeRaw) ?? .mesh
+        let idx = all.firstIndex(of: current) ?? 0
+        let next = all[(idx + 1) % all.count]
+        withAnimation(SX.spStandard) { bgThemeRaw = next.rawValue }
     }
 }

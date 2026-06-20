@@ -6,7 +6,7 @@ swiftc -O -sdk $(xcrun --show-sdk-path --sdk macosx) \
   -framework SwiftUI -framework AppKit -framework Foundation \
   -framework Combine -framework AVFoundation -framework UniformTypeIdentifiers \
   -o MediatronBinary \
-  Models.swift Engine.swift Views.swift App.swift LiquidWindow.swift
+  Models.swift Engine.swift FramerComponents.swift Views.swift App.swift LiquidWindow.swift
 EC=$?
 if [ -f MediatronBinary ]; then
   echo "OK: $(file MediatronBinary | cut -d: -f2)"

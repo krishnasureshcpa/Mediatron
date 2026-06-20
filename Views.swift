@@ -239,76 +239,57 @@ struct WelcomeView: View {
     @State private var logoY: CGFloat = -200
     @State private var logoRotation: Double = -30
     @State private var glowPulse: Double = 0
+    var backgroundTheme: BackgroundTheme = .mesh
+    var onCycleTheme: () -> Void = {}
     
     var body: some View {
         ZStack {
-            SX.canvas.ignoresSafeArea()
+            ThemeBackground(theme: backgroundTheme).ignoresSafeArea()
             
-            // Animated liquid gradient background
-            TimelineView(.animation) { tl in
-                let t = tl.date.timeIntervalSince1970
-                EllipticalGradient(
-                    colors: [SX.accent.opacity(0.08), Color.blue.opacity(0.04), Color.white],
-                    center: UnitPoint(x: 0.5 + sin(t * 0.3) * 0.2, y: 0.4 + cos(t * 0.2) * 0.15)
-                ).ignoresSafeArea()
+            // Light veil for dark themes so text stays readable
+            if backgroundTheme.isDark {
+                Color.white.opacity(0.06).ignoresSafeArea().allowsHitTesting(false)
             }
             
-            // Particle glow orbs
-            ForEach(0..<8) { i in
-                let angle = Double(i) * .pi / 4 + glowPulse
-                let radius: CGFloat = 120 + sin(glowPulse + Double(i)) * 30
-                Circle()
-                    .fill(SX.accent.opacity(0.06))
-                    .frame(width: 12, height: 12)
-                    .offset(x: cos(angle) * radius, y: sin(angle) * radius - 60)
-                    .blur(radius: 4)
-                    .opacity(phase >= 1 ? 0.8 : 0)
-                    .animation(.easeOut(duration: 0.8).delay(0.1 + Double(i) * 0.08), value: phase)
+            // Particle glow orbs (only on light themes)
+            if !backgroundTheme.isDark {
+                ForEach(0..<8) { i in
+                    let angle = Double(i) * .pi / 4 + glowPulse
+                    let radius: CGFloat = 120 + sin(glowPulse + Double(i)) * 30
+                    Circle()
+                        .fill(SX.accent.opacity(0.06))
+                        .frame(width: 12, height: 12)
+                        .offset(x: cos(angle) * radius, y: sin(angle) * radius - 60)
+                        .blur(radius: 4)
+                        .opacity(phase >= 1 ? 0.8 : 0)
+                        .animation(.easeOut(duration: 0.8).delay(0.1 + Double(i) * 0.08), value: phase)
+                }
             }
             
             VStack(spacing: 0) {
                 Spacer()
                 
-                // Flying logo — descends with rotation and bounce
-                ZStack {
-                    // Outer glow ring
-                    Circle()
-                        .stroke(SX.accent.opacity(0.2), lineWidth: 2)
-                        .frame(width: 100, height: 100)
-                        .scaleEffect(phase >= 1 ? 1.3 : 0.3)
-                        .opacity(phase >= 1 ? 0 : 0.6)
-                        .animation(.easeOut(duration: 0.6).delay(0.05), value: phase)
-                    
-                    // Logo square
-                    Rectangle()
-                        .fill(SX.accent)
-                        .frame(width: 72, height: 72)
-                        .overlay(
-                            Image(systemName: "waveform")
-                                .font(.system(size: 26, weight: .bold))
-                                .foregroundColor(.white)
-                        )
-                        .rotationEffect(.degrees(logoRotation))
-                        .offset(y: logoY)
-                }
-                .shadow(color: SX.accent.opacity(0.3), radius: 40, y: 15)
+                // LogoPreloader — cinematic pulsing brand mark
+                LogoPreloader(accent: SX.accent, size: 82)
+                    .offset(y: logoY)
+                    .rotationEffect(.degrees(logoRotation))
                 
                 Spacer().frame(height: 28)
                 
-                // Title — staggered character reveal feel
-                Text("MEDIATRON")
-                    .font(.system(size: 42, weight: .black, design: .default))
-                    .tracking(4)
-                    .foregroundStyle(SX.textPrimary)
-                    .opacity(phase >= 1 ? 1 : 0)
-                    .offset(y: phase >= 1 ? 0 : 20)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.3), value: phase)
+                // SplitTextReveal — character-by-character title reveal
+                SplitTextReveal(
+                    text: "MEDIATRON",
+                    font: .system(size: 46, weight: .black),
+                    color: backgroundTheme.isDark ? .white : SX.textPrimary,
+                    tracking: 6,
+                    trigger: phase >= 1
+                )
                 
                 // Subtitle
                 Text("Hollywood-Class Media Processing Studio")
                     .font(.system(size: 15, weight: .medium))
                     .tracking(1)
-                    .foregroundStyle(SX.textSecondary)
+                    .foregroundStyle(backgroundTheme.isDark ? Color.white.opacity(0.7) : SX.textSecondary)
                     .opacity(phase >= 1 ? 1 : 0)
                     .offset(y: phase >= 1 ? 0 : 15)
                     .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.45), value: phase)
@@ -557,14 +538,19 @@ struct Tog: View {
 struct MainAreaView: View {
     @EnvironmentObject var manager: MediaProcessingManager
     @State private var selected: UUID?
+    var backgroundTheme: BackgroundTheme = .mesh
     var body: some View {
         ZStack {
-            MeshBackground(intensity: 0.6).ignoresSafeArea()
+            ThemeBackground(theme: backgroundTheme).ignoresSafeArea()
+            // Light veil for dark themes
+            if backgroundTheme.isDark {
+                Color.white.opacity(0.04).ignoresSafeArea().allowsHitTesting(false)
+            }
             VStack(spacing: 0) {
-                ToolbarView()
+                ToolbarView(accent: backgroundTheme.isDark ? .white : SX.textPrimary)
                 Rectangle().fill(SX.glassBorder).frame(height: 1)
                 Group {
-                    if manager.tasks.isEmpty { EmptyState() }
+                    if manager.tasks.isEmpty { EmptyState(accent: backgroundTheme.isDark ? .white : SX.textPrimary) }
                     else { TaskListView(selected: $selected) }
                 }
                 Rectangle().fill(SX.glassBorder).frame(height: 1)
@@ -576,11 +562,12 @@ struct MainAreaView: View {
 
 struct ToolbarView: View {
     @EnvironmentObject var manager: MediaProcessingManager
+    var accent: Color = SX.textPrimary
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
-                Text("PROCESSING QUEUE").font(.system(size: 11, weight: .bold)).tracking(2).foregroundStyle(SX.textPrimary)
-                Text("\(manager.tasks.count) files").font(.system(size: 10)).foregroundStyle(SX.textSecondary)
+                Text("PROCESSING QUEUE").font(.system(size: 11, weight: .bold)).tracking(2).foregroundStyle(accent)
+                Text("\(manager.tasks.count) files").font(.system(size: 10)).foregroundStyle(accent.opacity(0.6))
             }
             Spacer()
             if let u = manager.tasks.first?.sourceURL {
@@ -610,7 +597,7 @@ struct ToolbarView: View {
                 Divider()
                 Button { manager.clearCompleted() } label: { Label("Clear", systemImage: "trash") }
             } label: { Label("Add", systemImage: "plus.circle.fill").font(.system(size: 11)) }
-                .buttonStyle(.bordered).tint(SX.textSecondary).menuIndicator(.hidden).fixedSize()
+                .buttonStyle(.bordered).tint(accent.opacity(0.8)).menuIndicator(.hidden).fixedSize()
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(SX.glassMid)
@@ -619,20 +606,21 @@ struct ToolbarView: View {
 
 struct EmptyState: View {
     @State private var pulse = false
+    var accent: Color = SX.textPrimary
     var body: some View {
         VStack(spacing: 16) {
             GlassPanel(radius: 20, padding: 20) {
                 VStack(spacing: 12) {
                     Image(systemName: "film.stack")
                         .font(.system(size: 32, weight: .light))
-                        .foregroundStyle(SX.textTertiary)
+                        .foregroundStyle(accent.opacity(0.6))
                         .symbolEffect(.pulse, options: .repeating, value: pulse)
                     Text("No media in queue")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(SX.textPrimary)
+                        .foregroundStyle(accent)
                     Text("⌘O to open files  ·  Drag & drop to import")
                         .font(.system(size: 11))
-                        .foregroundStyle(SX.textTertiary)
+                        .foregroundStyle(accent.opacity(0.55))
                 }
             }
         }
@@ -644,14 +632,31 @@ struct EmptyState: View {
 struct StatusStrip: View {
     @EnvironmentObject var manager: MediaProcessingManager
     @State private var showLog = false
+    @AppStorage("bgTheme") private var bgThemeRaw = BackgroundTheme.mesh.rawValue
+
     var body: some View {
+        let currentTheme = Binding<BackgroundTheme>(
+            get: { BackgroundTheme(rawValue: bgThemeRaw) ?? .mesh },
+            set: { newValue in bgThemeRaw = newValue.rawValue }
+        )
+
         HStack(spacing: 10) {
-            Image(systemName: manager.isProcessing ? "gearshape.2.fill" : "checkmark.circle.fill")
-                .font(.system(size: 9)).foregroundStyle(manager.isProcessing ? SX.accent : SX.success)
-                .symbolEffect(.pulse, options: .repeating, value: manager.isProcessing)
+            if manager.isProcessing {
+                HourglassLoader(size: 13, color: SX.accent)
+            } else {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 9)).foregroundStyle(SX.success)
+            }
             Text(manager.statusMessage).font(.system(size: 9)).foregroundStyle(SX.textSecondary).lineLimit(1)
+            if manager.isProcessing {
+                AnimatedCounter(value: manager.overallProgress * 100,
+                                format: { v in String(format: "%d%%", Int(v)) },
+                                font: .system(size: 9, weight: .semibold, design: .monospaced),
+                                color: SX.accent)
+            }
             Spacer()
             Button { showLog.toggle() } label: { Text("LOG").font(.system(size: 8, weight: .bold)).tracking(1).foregroundStyle(showLog ? SX.accent : SX.textTertiary) }.buttonStyle(.plain)
+            ThemePickerChip(theme: currentTheme)
             Text("M-Series")
                 .font(.system(size: 7))
                 .foregroundStyle(SX.textTertiary)
