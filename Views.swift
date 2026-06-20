@@ -100,54 +100,138 @@ struct CommandPalette: View {
     }
 }
 
-// MARK: - Welcome View
+// MARK: - Premium Welcome View (Cinematic Entrance)
 struct WelcomeView: View {
     @EnvironmentObject var manager: MediaProcessingManager
     @State private var phase = 0
+    @State private var logoY: CGFloat = -200
+    @State private var logoRotation: Double = -30
+    @State private var glowPulse: Double = 0
     
     var body: some View {
         ZStack {
             SX.canvas.ignoresSafeArea()
+            
+            // Animated liquid gradient background
             TimelineView(.animation) { tl in
                 let t = tl.date.timeIntervalSince1970
                 EllipticalGradient(
-                    colors: [SX.accent.opacity(0.06), Color.blue.opacity(0.04), Color.white],
-                    center: UnitPoint(x: 0.5 + sin(t * 0.3) * 0.15, y: 0.4 + cos(t * 0.25) * 0.1)
+                    colors: [SX.accent.opacity(0.08), Color.blue.opacity(0.04), Color.white],
+                    center: UnitPoint(x: 0.5 + sin(t * 0.3) * 0.2, y: 0.4 + cos(t * 0.2) * 0.15)
                 ).ignoresSafeArea()
             }
+            
+            // Particle glow orbs
+            ForEach(0..<8) { i in
+                let angle = Double(i) * .pi / 4 + glowPulse
+                let radius: CGFloat = 120 + sin(glowPulse + Double(i)) * 30
+                Circle()
+                    .fill(SX.accent.opacity(0.06))
+                    .frame(width: 12, height: 12)
+                    .offset(x: cos(angle) * radius, y: sin(angle) * radius - 60)
+                    .blur(radius: 4)
+                    .opacity(phase >= 1 ? 0.8 : 0)
+                    .animation(.easeOut(duration: 0.8).delay(0.1 + Double(i) * 0.08), value: phase)
+            }
+            
             VStack(spacing: 0) {
                 Spacer()
-                Rectangle().fill(SX.accent).frame(width: 64, height: 64)
-                    .shadow(color: SX.accentGlow, radius: 30, y: 6)
-                    .overlay(Image(systemName: "waveform").font(.system(size: 24, weight: .bold)).foregroundColor(.white))
-                    .scaleEffect(phase >= 1 ? 1 : 0.5).opacity(phase >= 1 ? 1 : 0)
-                    .animation(SX.spDramatic.delay(0.1), value: phase)
-                Spacer().frame(height: 20)
-                Text("Mediatron").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(SX.textPrimary)
-                    .opacity(phase >= 1 ? 1 : 0).offset(y: phase >= 1 ? 0 : 8)
-                    .animation(SX.spStandard.delay(0.2), value: phase)
-                Text("Hollywood-grade media processing, 100% offline.").font(.system(size: 14)).foregroundStyle(SX.textSecondary)
-                    .opacity(phase >= 1 ? 1 : 0).offset(y: phase >= 1 ? 0 : 6)
-                    .animation(SX.spStandard.delay(0.3), value: phase)
-                Spacer().frame(height: 32)
-                DropTargetView().opacity(phase >= 1 ? 1 : 0).animation(SX.spStandard.delay(0.35), value: phase)
+                
+                // Flying logo — descends with rotation and bounce
+                ZStack {
+                    // Outer glow ring
+                    Circle()
+                        .stroke(SX.accent.opacity(0.2), lineWidth: 2)
+                        .frame(width: 100, height: 100)
+                        .scaleEffect(phase >= 1 ? 1.3 : 0.3)
+                        .opacity(phase >= 1 ? 0 : 0.6)
+                        .animation(.easeOut(duration: 0.6).delay(0.05), value: phase)
+                    
+                    // Logo square
+                    Rectangle()
+                        .fill(SX.accent)
+                        .frame(width: 72, height: 72)
+                        .overlay(
+                            Image(systemName: "waveform")
+                                .font(.system(size: 26, weight: .bold))
+                                .foregroundColor(.white)
+                        )
+                        .rotationEffect(.degrees(logoRotation))
+                        .offset(y: logoY)
+                }
+                .shadow(color: SX.accent.opacity(0.3), radius: 40, y: 15)
+                
+                Spacer().frame(height: 28)
+                
+                // Title — staggered character reveal feel
+                Text("MEDIATRON")
+                    .font(.system(size: 42, weight: .black, design: .default))
+                    .tracking(4)
+                    .foregroundStyle(SX.textPrimary)
+                    .opacity(phase >= 1 ? 1 : 0)
+                    .offset(y: phase >= 1 ? 0 : 20)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.3), value: phase)
+                
+                // Subtitle
+                Text("Hollywood-Class Media Processing Studio")
+                    .font(.system(size: 15, weight: .medium))
+                    .tracking(1)
+                    .foregroundStyle(SX.textSecondary)
+                    .opacity(phase >= 1 ? 1 : 0)
+                    .offset(y: phase >= 1 ? 0 : 15)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.45), value: phase)
+                
+                // Privacy badge
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.shield.fill").font(.system(size: 10))
+                    Text("100% Offline & Private")
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(1)
+                }
+                .foregroundStyle(SX.accent)
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .background(Rectangle().fill(SX.accentBg).overlay(Rectangle().strokeBorder(SX.accent.opacity(0.3))))
+                .opacity(phase >= 1 ? 1 : 0)
+                .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.6), value: phase)
+                .padding(.top, 12)
+                
+                Spacer().frame(height: 36)
+                
+                // Drop zone
+                DropTargetView()
+                    .opacity(phase >= 1 ? 1 : 0)
+                    .scaleEffect(phase >= 1 ? 1 : 0.95)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.7), value: phase)
+                
                 Spacer().frame(height: 16)
-                HStack(spacing: 10) {
+                
+                // Action buttons
+                HStack(spacing: 12) {
                     Button { let p = NSOpenPanel(); p.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie, .movie]; p.allowsMultipleSelection = true; if p.runModal() == .OK { manager.addFiles(p.urls) } }
                         label: { Label("Open Files", systemImage: "doc.badge.plus").font(.system(size: 13, weight: .medium)).padding(.horizontal, 18).padding(.vertical, 9) }
                         .buttonStyle(.bordered).tint(SX.textSecondary).controlSize(.large).accessibilityLabel("Open media files")
                     Button { let p = NSOpenPanel(); p.canChooseDirectories = true; if p.runModal() == .OK, let u = p.url { manager.addFolder(u) } }
                         label: { Label("Import Folder", systemImage: "folder.badge.plus").font(.system(size: 13, weight: .semibold)).padding(.horizontal, 18).padding(.vertical, 9) }
                         .buttonStyle(.borderedProminent).tint(SX.accent).controlSize(.large).accessibilityLabel("Import folder")
-                }.opacity(phase >= 1 ? 1 : 0).animation(SX.spStandard.delay(0.42), value: phase)
-                Spacer().frame(height: 10)
-                HStack(spacing: 6) {
-                    Pill(icon: "lock.shield.fill", text: "Offline & Private"); Pill(icon: "cpu.fill", text: "Apple Silicon"); Pill(icon: "sparkles", text: "AI Pipeline")
-                }.opacity(phase >= 1 ? 1 : 0).animation(SX.spStandard.delay(0.5), value: phase)
+                }
+                .opacity(phase >= 1 ? 1 : 0)
+                .offset(y: phase >= 1 ? 0 : 8)
+                .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.8), value: phase)
+                
                 Spacer()
             }.padding(40)
         }
-        .onAppear { withAnimation { phase = 1 } }
+        .onAppear {
+            withAnimation(.spring(response: 0.8, dampingFraction: 0.55)) {
+                logoY = 0
+                logoRotation = 0
+                phase = 1
+            }
+            // Continuous glow pulse
+            withAnimation(.easeInOut(duration: 3).repeatForever(autoreverses: true)) {
+                glowPulse = .pi * 2
+            }
+        }
         .onDrop(of: [.fileURL], isTargeted: .constant(false)) { providers in
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in
