@@ -460,7 +460,7 @@ final class PipelineEngine {
         return nil
     }
     
-    // ── ffmpeg-based output rendering ──
+    // ── ffmpeg-based output rendering (fixed: hardware encode, adaptive bitrate, no fake files) ──
     func renderOutput(source: URL, options: ProcessingOptions, progress: @escaping (Double) -> Void) async -> URL? {
         let name = source.deletingPathExtension().lastPathComponent
         let ext = options.outputFormat == .mp4 ? "mp4" : options.outputFormat == .mkv ? "mkv" : options.outputFormat == .mov ? "mov" : "webm"
@@ -468,7 +468,6 @@ final class PipelineEngine {
         // Determine output location
         let outputURL: URL
         if options.replaceOriginal {
-            // In-place: output to same directory, temp name, then replace
             let tmpName = "\(name)_tmp_\(UUID().uuidString.prefix(6)).\(ext)"
             outputURL = source.deletingLastPathComponent().appendingPathComponent(tmpName)
         } else {
@@ -477,58 +476,181 @@ final class PipelineEngine {
         }
         try? FileManager.default.removeItem(at: outputURL)
         
-        var ffmpegSuccess = false
+        guard let ffmpeg = ShellRunner.find("ffmpeg") else {
+            print("[Engine] ffmpeg not found")
+            return nil
+        }
         
-        if let ffmpeg = ShellRunner.find("ffmpeg") {
-            var args: [String] = ["-y", "-i", source.path]
-            if options.enableUpscaling {
-                args += ["-vf", "scale=\(options.upscaleTarget == .k8 ? 7680 : 3840):-2:flags=lanczos"]
+        // ── Probe source to get sensible bitrate ──
+        var sourceBitrate: Int64 = 0
+        if let probe = ShellRunner.find("ffprobe") {
+            let r = ShellRunner.run(probe, arguments: [
+                "-v", "error", "-show_entries", "format=bit_rate",
+                "-of", "csv=p=0", source.path
+            ], timeout: 10)
+            if r.exitCode == 0 {
+                sourceBitrate = Int64(r.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             }
-            args += ["-c:v", "hevc_videotoolbox", "-b:v", options.enableUpscaling ? (options.upscaleTarget == .k8 ? "80M" : "40M") : "15M"]
-            args += ["-allow_sw", "1", "-tag:v", "hvc1"]
-            args += ["-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart"]
-            if options.enableSubtitles, case .softEmbedded = options.subtitleMode {
-                let srt = source.deletingPathExtension().appendingPathExtension("srt")
-                if FileManager.default.fileExists(atPath: srt.path) { args += ["-i", srt.path, "-c:s", "mov_text"] }
+        }
+        // If source bitrate is unknown or unreasonably low, use a sensible default
+        if sourceBitrate < 100_000 {
+            sourceBitrate = 2_000_000 // 2 Mbps fallback
+        }
+        
+        // ── Calculate output bitrate ──
+        // For upscaling: multiply source bitrate by area ratio (pixel count factor)
+        // but cap at reasonable max to avoid extreme files/encode times
+        let outputBitrate: String
+        if options.enableUpscaling {
+            let scaleFactor: Double = options.upscaleTarget == .k8 ? 16.0 : 4.0
+            let calculated = Double(sourceBitrate) * scaleFactor
+            let capped = min(calculated, options.upscaleTarget == .k8 ? 50_000_000 : 25_000_000)
+            outputBitrate = "\(Int(capped))"
+        } else {
+            // No upscale: keep similar bitrate or modest bump
+            let calc = max(Double(sourceBitrate) * 1.2, 1_500_000)
+            outputBitrate = "\(Int(min(calc, 15_000_000)))"
+        }
+        
+        // ── Choose video encoder ──
+        // h264_videotoolbox is fastest on Apple Silicon; hevc_videotoolbox for studio quality
+        let (vCodec, vTag): (String, String)
+        if options.processingQuality == .studio || options.outputFormat == .mkv {
+            vCodec = "hevc_videotoolbox"; vTag = "hvc1"
+        } else {
+            vCodec = "h264_videotoolbox"; vTag = "avc1"
+        }
+        
+        // ── Build arguments ──
+        var args: [String] = ["-y", "-i", source.path]
+        
+        // Video filter chain
+        if options.enableUpscaling {
+            let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
+            args += ["-vf", "scale=\(targetW):-2:flags=lanczos"]
+        }
+        
+        // Video encoding
+        args += ["-c:v", vCodec, "-b:v", outputBitrate, "-tag:v", vTag]
+        
+        // Pixel format — videotoolbox needs explicit yuv420p for compatibility
+        args += ["-pix_fmt", "yuv420p"]
+        
+        // Audio encoding
+        if options.enableDubbing {
+            args += ["-c:a", "aac", "-b:a", "192k"]
+        } else {
+            args += ["-c:a", "copy"]
+        }
+        
+        // Fast start for web playback
+        args += ["-movflags", "+faststart"]
+        
+        // Subtitles (if SRT exists alongside source)
+        if options.enableSubtitles, case .softEmbedded = options.subtitleMode {
+            let srt = source.deletingPathExtension().appendingPathExtension("srt")
+            if FileManager.default.fileExists(atPath: srt.path) {
+                args += ["-i", srt.path, "-c:s", "mov_text"]
             }
-            args.append(outputURL.path)
+        }
+        
+        args.append(outputURL.path)
+        
+        // ── Execute ffmpeg with progress capture ──
+        let process = Process()
+        process.launchPath = ffmpeg
+        process.arguments = args
+        process.qualityOfService = .userInitiated
+        
+        let ep = Pipe()
+        let outPipe = Pipe()
+        process.standardError = ep
+        process.standardOutput = outPipe
+        
+        // Estimate total duration for progress tracking
+        let estimatedDuration = await estimateDuration(source)
+        
+        do {
+            try process.run()
             
-            let process = Process(); process.launchPath = ffmpeg; process.arguments = args
-            process.qualityOfService = .userInitiated
-            let ep = Pipe(); process.standardError = ep; process.standardOutput = FileHandle.nullDevice
-            ep.fileHandleForReading.readabilityHandler = { h in
-                let d = h.availableData; if !d.isEmpty, let s = String(data: d, encoding: .utf8), let tr = s.range(of: "time=") {
-                    let rest = String(s[tr.upperBound...]).trimmingCharacters(in: .whitespaces)
-                    if let si = rest.firstIndex(of: " ") { let t = String(rest[..<si]); let p = t.split(separator: ":"); if p.count == 3, let hh = Double(p[0]), let mm = Double(p[1]), let ss = Double(p[2]) { progress(min(0.9, (hh*3600+mm*60+ss)/3600)) } }
+            // Read stderr in a background thread for progress
+            let stderrData = NSMutableData()
+            let readGroup = DispatchGroup()
+            readGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let handle = ep.fileHandleForReading
+                while true {
+                    let data = handle.availableData
+                    if data.isEmpty { break }
+                    stderrData.append(data)
+                    if data.count > 0, let s = String(data: data, encoding: .utf8) {
+                        self.parseFFmpegProgress(s, estimatedDuration: estimatedDuration, progress: progress)
+                    }
                 }
+                readGroup.leave()
             }
-            do { try process.run(); process.waitUntilExit(); ep.fileHandleForReading.readabilityHandler = nil; ffmpegSuccess = process.terminationStatus == 0 && FileManager.default.fileExists(atPath: outputURL.path) } catch {}
+            
+            process.waitUntilExit()
+            readGroup.wait()
+            ep.fileHandleForReading.readabilityHandler = nil
+            
+            let exitCode = process.terminationStatus
+            let stderrStr = String(data: stderrData as Data, encoding: .utf8) ?? ""
+            
+            guard exitCode == 0, FileManager.default.fileExists(atPath: outputURL.path) else {
+                print("[Engine] ffmpeg failed (exit \(exitCode)): \(stderrStr.prefix(500))")
+                return nil
+            }
+        } catch {
+            print("[Engine] ffmpeg launch error: \(error.localizedDescription)")
+            return nil
         }
         
-        // Always create output file if ffmpeg didn't produce one
-        if !ffmpegSuccess {
-            try? "Mediatron processed: \(source.lastPathComponent)".write(to: outputURL, atomically: true, encoding: .utf8)
-        }
-        
-        // Integrity check
-        var integrityPassed = false
-        if options.enableIntegrityCheck {
-            integrityPassed = runIntegrityCheck(source: source, output: outputURL)
-        }
-        
-        // In-place replacement: swap output over original
-        if options.replaceOriginal, ffmpegSuccess {
+        // ── In-place replacement ──
+        if options.replaceOriginal {
             let backup = source.deletingPathExtension().appendingPathExtension("bak")
             try? FileManager.default.removeItem(at: backup)
             try? FileManager.default.moveItem(at: source, to: backup)
             try? FileManager.default.moveItem(at: outputURL, to: source)
             try? FileManager.default.removeItem(at: backup)
             progress(1.0)
-            return source // Return the original path (now replaced)
+            return source
         }
         
         progress(1.0)
         return outputURL
+    }
+    
+    /// Estimate video duration from source using ffprobe
+    private func estimateDuration(_ url: URL) async -> Double {
+        if let ffprobe = ShellRunner.find("ffprobe") {
+            let r = ShellRunner.run(ffprobe, arguments: [
+                "-v", "error", "-show_entries", "format=duration",
+                "-of", "csv=p=0", url.path
+            ], timeout: 10)
+            if r.exitCode == 0 {
+                return Double(r.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 30.0
+            }
+        }
+        return 30.0
+    }
+    
+    /// Parse ffmpeg's stderr time= field for progress
+    private func parseFFmpegProgress(_ stderr: String, estimatedDuration: Double, progress: (Double) -> Void) {
+        guard estimatedDuration > 0 else { return }
+        let pattern = try? NSRegularExpression(pattern: "time=([0-9]{2}):([0-9]{2}):([0-9]{2}(?:\\.[0-9]+)?)")
+        let nsRange = NSRange(stderr.startIndex..., in: stderr)
+        if let match = pattern?.firstMatch(in: stderr, range: nsRange),
+           let hRange = Range(match.range(at: 1), in: stderr),
+           let mRange = Range(match.range(at: 2), in: stderr),
+           let sRange = Range(match.range(at: 3), in: stderr),
+           let hh = Double(stderr[hRange]),
+           let mm = Double(stderr[mRange]),
+           let ss = Double(stderr[sRange]) {
+            let current = hh * 3600 + mm * 60 + ss
+            let p = min(0.95, current / estimatedDuration)
+            progress(p)
+        }
     }
     
     func runIntegrityCheck(source: URL, output: URL) -> Bool {
