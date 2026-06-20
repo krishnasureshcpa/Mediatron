@@ -171,6 +171,70 @@ struct StatusPill: View {
     }
 }
 
+// MARK: - Language Picker (100+ languages, searchable)
+struct LanguagePicker: View {
+    @Binding var selection: String
+    var showAuto: Bool = false
+    var autoLabel: String = "Auto"
+    var compact: Bool = false
+    
+    @State private var searchText = ""
+    
+    var filteredLanguages: [SpokenLanguage] {
+        let allLanguages = showAuto ? [SpokenLanguage.auto] + SpokenLanguage.all : SpokenLanguage.all
+        guard !searchText.isEmpty else { return allLanguages }
+        return allLanguages.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText) ||
+            $0.id.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
+    var body: some View {
+        Menu {
+            // Search field
+            if !compact {
+                TextField("Search language…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .padding(4)
+            }
+            
+            ForEach(filteredLanguages) { lang in
+                Button {
+                    selection = lang.id
+                    searchText = ""
+                } label: {
+                    HStack {
+                        Text(lang.name).font(.system(size: 11))
+                        Spacer()
+                        if lang.id == selection {
+                            Image(systemName: "checkmark").font(.system(size: 9)).foregroundStyle(SX.accent)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(currentLabel).font(.system(size: compact ? 10 : 11, weight: .medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 7)).foregroundStyle(SX.textTertiary)
+            }
+            .foregroundStyle(SX.textPrimary)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(SX.surface))
+            .overlay(Capsule().strokeBorder(SX.border, lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+    
+    var currentLabel: String {
+        if selection == "auto" { return autoLabel }
+        return SpokenLanguage.displayName(for: selection)
+    }
+}
+
 // MARK: - Command Palette
 struct CommandPalette: View {
     @EnvironmentObject var manager: MediaProcessingManager
@@ -440,8 +504,39 @@ struct SidebarView: View {
                         }
                     }
                     SideSec(title: "DUBBING", icon: "mic.fill") {
-                        Tog("Auto-Dub to English", $manager.options.enableDubbing)
+                        Tog("Auto-Dub", $manager.options.enableDubbing)
                         if manager.options.enableDubbing {
+                            // Source language — auto-detected or manual override
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Source Language").font(.system(size: 8)).foregroundStyle(SX.textTertiary).tracking(0.5)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "waveform.badge.mic").font(.system(size: 8)).foregroundStyle(SX.accent)
+                                    LanguagePicker(
+                                        selection: $manager.options.sourceLanguage,
+                                        showAuto: true,
+                                        autoLabel: "Auto-Detect",
+                                        compact: true
+                                    )
+                                    .font(.system(size: 10))
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            
+                            // Target language
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Dub To").font(.system(size: 8)).foregroundStyle(SX.textTertiary).tracking(0.5)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "globe").font(.system(size: 8)).foregroundStyle(SX.accent)
+                                    LanguagePicker(
+                                        selection: $manager.options.targetLanguage,
+                                        showAuto: false,
+                                        compact: true
+                                    )
+                                    .font(.system(size: 10))
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            
                             Tog("Hollywood Lip-Sync", $manager.options.enableLipSync, sub: "Frame-by-frame morphing")
                             Tog("Voice Cloning", $manager.options.enableVoiceCloning, sub: "Preserve speaker tone")
                         }
@@ -498,7 +593,7 @@ struct SidebarView: View {
                 .accessibilityLabel("Start processing")
                 .opacity((manager.isProcessing || manager.tasks.isEmpty) ? 0.5 : 1.0)
                 .animation(SX.spLift, value: manager.tasks.count)
-
+                
                 HStack {
                     Button("Clear") { manager.clearCompleted() }.font(.system(size: 10)).foregroundStyle(SX.textSecondary).buttonStyle(.plain)
                     Spacer()
@@ -740,12 +835,18 @@ struct TaskCard: View {
             // Meta row
             HStack(spacing: 4) {
                 if let lang = task.detectedLanguage {
-                    Text(lang)
-                        .font(.system(size: 8, weight: .semibold))
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Capsule().fill(SX.accentBg))
-                        .foregroundStyle(SX.accent)
+                    HStack(spacing: 2) {
+                        Image(systemName: "waveform").font(.system(size: 7))
+                        Text(SpokenLanguage.displayName(for: lang))
+                    }
+                    .font(.system(size: 8, weight: .semibold))
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(Capsule().fill(SX.accentBg))
+                    .foregroundStyle(SX.accent)
                 }
+                Text(task.targetLanguageDisplay)
+                    .font(.system(size: 8))
+                    .foregroundStyle(SX.textSecondary)
                 if let codec = task.videoCodec, !codec.isEmpty {
                     Text(codec)
                         .font(.system(size: 8)).foregroundStyle(SX.textTertiary)

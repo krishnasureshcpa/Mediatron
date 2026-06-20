@@ -92,6 +92,8 @@ final class MediaProcessingManager: ObservableObject {
         }
         if phase == .welcome { phase = .ready }
         addLog(.queued, "Added \(urls.count) file(s)")
+        // Auto-detect language in background for new files
+        Task { await autoDetectLanguages() }
     }
     
     func addFolder(_ url: URL) {
@@ -111,6 +113,32 @@ final class MediaProcessingManager: ObservableObject {
         }
         if phase == .welcome { phase = .ready }
         addLog(.queued, "Imported \(mediaURLs.count) media files")
+        // Auto-detect language in background
+        Task { await autoDetectLanguages() }
+    }
+    
+    /// Auto-detect source language for all queued tasks without a detected language
+    func autoDetectLanguages() async {
+        let queued = tasks.enumerated().filter { $0.element.detectedLanguage == nil && $0.element.status == .queued }
+        guard !queued.isEmpty else { return }
+        addLog(.detecting, "Auto-detecting language for \(queued.count) file(s)...")
+        for item in queued.prefix(5) { // batch of 5 max
+            let idx = item.offset
+            let task = item.element
+            guard task.detectedLanguage == nil else { continue }
+            await updateStatus(at: idx, to: .detecting)
+            if let lang = await engine.detectLanguage(task.sourceURL) {
+                await updateLang(at: idx, language: lang)
+                addLog(.detecting, "[\(task.fileName)] Detected: \(SpokenLanguage.displayName(for: lang))")
+            } else {
+                // Keep nil — user can set manually or it'll detect during transcription
+                addLog(.detecting, "[\(task.fileName)] Could not detect — will auto-detect during transcribe")
+            }
+            // Restore queued status
+            if tasks[idx].detectedLanguage != nil {
+                await updateStatus(at: idx, to: .queued)
+            }
+        }
     }
     
     func removeTask(_ task: MediaTask) {
@@ -458,6 +486,54 @@ final class PipelineEngine {
             }
         }
         return nil
+    }
+    
+    // ── Fast language detection (sample first 30s, detect without full transcribe) ──
+    /// Detect spoken language from the first 30s of audio. Returns ISO 639-1 code or nil.
+    func detectLanguage(_ url: URL) async -> String? {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let audioPath = tempDir.appendingPathComponent("sample.wav").path
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        
+        // Extract short audio sample (first 30 seconds)
+        guard let ffmpeg = ShellRunner.find("ffmpeg") else { return nil }
+        let extract = ShellRunner.run(ffmpeg, arguments: [
+            "-y", "-i", url.path,
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "16000", "-ac", "1",
+            "-t", "30", // 30 seconds is enough for language detection
+            audioPath
+        ], timeout: 30)
+        guard extract.exitCode == 0 else { return nil }
+        
+        // Run whisper with auto language detection
+        guard let whisperCli = ShellRunner.find("whisper-cli"),
+              let model = findWhisperModel() else { return nil }
+        
+        // Use the smallest model for fast detection — tiny model is ~75MB and runs in seconds
+        let detectModel = model  // Uses whatever model is available
+        
+        let result = ShellRunner.run(whisperCli, arguments: [
+            "-m", detectModel,
+            "-f", audioPath,
+            "-l", "auto",
+            "-oj", // JSON output
+            "-of", tempDir.appendingPathComponent("detect").path,
+            "-np"  // No prints to stdout (reduces overhead)
+        ], timeout: 60)
+        
+        // Parse JSON output
+        let jsonPath = tempDir.appendingPathComponent("detect.json").path
+        if let jsonData = try? Data(contentsOf: URL(fileURLWithPath: jsonPath)),
+           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            if let detectedLang = json["language"] as? String {
+                return detectedLang.lowercased()
+            }
+        }
+        
+        // Fallback: parse stdout for language
+        return parseLanguage(result.output)
     }
     
     // ── ffmpeg-based output rendering (fixed: hardware encode, adaptive bitrate, no fake files) ──
