@@ -481,12 +481,47 @@ final class PipelineEngine {
             return nil
         }
         
+        // ── Real AI Upscaling with fx-upscale (Metal GPU) ──
+        // If AI Upscaler is enabled, upscale the source first using Metal GPU
+        var workingSource = source
+        if options.enableUpscaling {
+            progress(0.15)
+            if let fxUpscale = ShellRunner.find("fx-upscale") {
+                let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
+                let targetH = options.upscaleTarget == .k8 ? 4320 : 2160
+                let tempUpscaled = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("\(UUID().uuidString)_upscaled.m4v")
+                
+                let scaleResult = ShellRunner.run(fxUpscale, arguments: [
+                    source.path,
+                    "--width", "\(targetW)",
+                    "--height", "\(targetH)",
+                    "--codec", "h264"
+                ], timeout: 300)
+                
+                if scaleResult.exitCode == 0 {
+                    // fx-upscale outputs: source_Upscaled.mp4 in same directory
+                    let upscaledPath = source.deletingLastPathComponent()
+                        .appendingPathComponent("\(source.deletingPathExtension().lastPathComponent) Upscaled.mp4")
+                        .path
+                    if FileManager.default.fileExists(atPath: upscaledPath) {
+                        workingSource = URL(fileURLWithPath: upscaledPath)
+                        print("[Engine] fx-upscale succeeded → \(workingSource.lastPathComponent)")
+                    }
+                } else {
+                    print("[Engine] fx-upscale failed: \(scaleResult.output.prefix(200))")
+                    // Fall through to ffmpeg lanczos as backup
+                }
+                progress(0.20)
+            }
+        }
+        
         // ── Probe source to get sensible bitrate ──
         var sourceBitrate: Int64 = 0
         if let probe = ShellRunner.find("ffprobe") {
             let r = ShellRunner.run(probe, arguments: [
                 "-v", "error", "-show_entries", "format=bit_rate",
-                "-of", "csv=p=0", source.path
+                "-of", "csv=p=0", workingSource.path
             ], timeout: 10)
             if r.exitCode == 0 {
                 sourceBitrate = Int64(r.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
@@ -522,13 +557,9 @@ final class PipelineEngine {
         }
         
         // ── Build arguments ──
-        var args: [String] = ["-y", "-i", source.path]
+        var args: [String] = ["-y", "-i", workingSource.path]
         
-        // Video filter chain
-        if options.enableUpscaling {
-            let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
-            args += ["-vf", "scale=\(targetW):-2:flags=lanczos"]
-        }
+        // No ffmpeg scale filter needed — AI Upscaling was handled by fx-upscale above
         
         // Video encoding
         args += ["-c:v", vCodec, "-b:v", outputBitrate, "-tag:v", vTag]
@@ -568,7 +599,7 @@ final class PipelineEngine {
         process.standardOutput = outPipe
         
         // Estimate total duration for progress tracking
-        let estimatedDuration = await estimateDuration(source)
+        let estimatedDuration = await estimateDuration(workingSource)
         
         do {
             try process.run()
