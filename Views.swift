@@ -5,20 +5,24 @@ import UniformTypeIdentifiers
 // MARK: - Swiss International Style Tokens
 enum SX {
     static let canvas = Color.white
-    static let surface = Color(red: 0.949, green: 0.949, blue: 0.949)
+    static let surface = Color(red: 0.96, green: 0.96, blue: 0.97)
     static let elevated = Color.white
+    static let glass = Color.white.opacity(0.72)
+    static let glassStrong = Color.white.opacity(0.85)
     static let textPrimary = Color.black
     static let textSecondary = Color(red: 0.3, green: 0.3, blue: 0.3)
     static let textTertiary = Color(red: 0.5, green: 0.5, blue: 0.5)
     static let accent = Color(red: 1.0, green: 0.188, blue: 0.0)
-    static let accentBg = Color(red: 1.0, green: 0.188, blue: 0.0).opacity(0.08)
+    static let accentBg = Color(red: 1.0, green: 0.188, blue: 0.0).opacity(0.06)
+    static let accentMuted = Color(red: 1.0, green: 0.188, blue: 0.0).opacity(0.03)
+    static let cardHover = Color.black.opacity(0.02)
     static let success = Color.green
     static let danger = Color(red: 1.0, green: 0.188, blue: 0.0)
     static let border = Color.black.opacity(0.15)
     static let borderStrong = Color.black
-    static let rControl: CGFloat = 0
-    static let rCard: CGFloat = 0
-    static let rPanel: CGFloat = 0
+    static let rControl: CGFloat = 8
+    static let rCard: CGFloat = 10
+    static let rPanel: CGFloat = 18  // premium continuous radius
     static let shadowSm = Color.black.opacity(0.08)
     static let shadowMd = Color.black.opacity(0.12)
     static let animSnap = Animation.spring(response: 0.25, dampingFraction: 0.9)
@@ -33,11 +37,139 @@ enum SX {
     static let spFluid = Animation.interactiveSpring(response: 0.3, dampingFraction: 0.82, blendDuration: 0)
     static let amber = Color.orange
     static let teal = Color(red: 0.2, green: 0.6, blue: 0.6)
-    static let glass = Color.white.opacity(0.5)
-    static let glassStrong = Color.white.opacity(0.7)
     static let accentGlow = SX.accent.opacity(0.12)
+
+    // MARK: - Framer-style premium layer (glassmorphism + bento)
+    // Three glass opacity tiers (translucent white panel layers)
+    static let glassSoft   = Color.white.opacity(0.55)
+    static let glassMid    = Color.white.opacity(0.78)
+    static let glassHard   = Color.white.opacity(0.94)
+    // Subtle inner highlight + outer ring for premium edges
+    static let glassEdge   = Color.white.opacity(0.9)
+    static let glassBorder = Color.black.opacity(0.06)
+    static let glassInk    = Color.white.opacity(0.5)
+    // Mesh gradient anchors (used by AnimatedGradientBg)
+    static let meshA = Color(red: 1.00, green: 0.95, blue: 0.92) // warm white
+    static let meshB = Color(red: 0.94, green: 0.97, blue: 1.00) // cool white
+    static let meshC = Color(red: 1.00, green: 0.92, blue: 0.94) // pink whisper
+    static let meshD = Color(red: 0.96, green: 1.00, blue: 0.94) // mint whisper
+    // Premium radii — micro-rounded for Swiss-with-softness hybrid
+    static let rPill:  CGFloat = 999
+    static let rTile:  CGFloat = 14
+    // Glow shadow for hover-lift — accent bleed
+    static let glowRed  = SX.accent.opacity(0.20)
+    static let glowSoft = Color.black.opacity(0.08)
+    // Premium springs tuned for Framer-style micro-interactions
+    static let spLift   = Animation.interactiveSpring(response: 0.42, dampingFraction: 0.78, blendDuration: 0)
+    static let spGlow   = Animation.easeOut(duration: 0.35)
+    static let spMesh   = Animation.linear(duration: 12).repeatForever(autoreverses: true)
 }
 typealias GX = SX
+
+// MARK: - Premium Visual Components (Framer-style)
+/// Animated mesh-gradient background — slowly drifting radial blobs.
+/// Used under the welcome view and main canvas for ambient depth.
+struct MeshBackground: View {
+    var intensity: Double = 1.0
+    var body: some View {
+        TimelineView(.animation) { tl in
+            let t = tl.date.timeIntervalSince1970
+            ZStack {
+                // Base wash
+                SX.canvas.ignoresSafeArea()
+                // Drifting blob A — accent
+                RadialGradient(
+                    colors: [SX.accent.opacity(0.10 * intensity), Color.clear],
+                    center: UnitPoint(x: 0.5 + sin(t * 0.20) * 0.25,
+                                      y: 0.4 + cos(t * 0.15) * 0.20),
+                    startRadius: 20, endRadius: 380
+                ).ignoresSafeArea().blendMode(.normal)
+                // Drifting blob B — cool
+                RadialGradient(
+                    colors: [SX.meshB.opacity(0.55 * intensity), Color.clear],
+                    center: UnitPoint(x: 0.2 + sin(t * 0.13 + 1.2) * 0.20,
+                                      y: 0.8 + cos(t * 0.17 + 0.6) * 0.15),
+                    startRadius: 30, endRadius: 420
+                ).ignoresSafeArea().blendMode(.normal)
+                // Drifting blob C — warm whisper
+                RadialGradient(
+                    colors: [SX.meshC.opacity(0.45 * intensity), Color.clear],
+                    center: UnitPoint(x: 0.85 + cos(t * 0.11 + 2.4) * 0.18,
+                                      y: 0.15 + sin(t * 0.19 + 1.1) * 0.18),
+                    startRadius: 25, endRadius: 360
+                ).ignoresSafeArea().blendMode(.normal)
+                // Subtle grain — fractal noise overlaid at 4% alpha for tactile feel
+                Rectangle().fill(.ultraThinMaterial).opacity(0.15 * intensity).ignoresSafeArea()
+            }
+        }
+    }
+}
+
+/// Glass panel — translucent layered background with inner highlight + outer border.
+/// Framer's signature frosted-surface effect, tuned for SwiftUI.
+struct GlassPanel<Content: View>: View {
+    var tint: Color = .white
+    var radius: CGFloat = SX.rPanel
+    var padding: CGFloat = 0
+    @ViewBuilder var content: Content
+    var body: some View {
+        content
+            .padding(padding)
+            .background(
+                ZStack {
+                    // Soft backdrop blur, then layered translucent whites
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(tint.opacity(0.55))
+                    // Inner highlight (top edge)
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [SX.glassEdge, Color.white.opacity(0.0)],
+                                startPoint: .top, endPoint: .center
+                            ),
+                            lineWidth: 1
+                        )
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(SX.glassBorder, lineWidth: 1)
+            )
+            .shadow(color: SX.glowSoft, radius: 12, x: 0, y: 6)
+    }
+}
+
+/// Hover-lift card wrapper — accent-glow shadow on hover, smooth spring.
+/// Pair with `.hoverGlow($hover)` modifier on any tappable surface.
+struct HoverLift<Content: View>: View {
+    @ViewBuilder var content: Content
+    @State private var hover = false
+    var body: some View {
+        content
+            .scaleEffect(hover ? 1.015 : 1.0)
+            .shadow(color: hover ? SX.glowRed : Color.clear, radius: hover ? 18 : 0, x: 0, y: hover ? 6 : 0)
+            .shadow(color: SX.glowSoft, radius: 4, x: 0, y: 2)
+            .animation(SX.spLift, value: hover)
+            .onHover { hover = $0 }
+    }
+}
+
+/// Reusable Framer-style status pill — glass capsule with icon + token label.
+struct StatusPill: View {
+    let icon: String; let text: String; let color: Color
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+            Text(text).font(.system(size: 9, weight: .semibold)).tracking(0.5)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(Capsule().fill(color.opacity(0.10)))
+        .overlay(Capsule().strokeBorder(color.opacity(0.25), lineWidth: 1))
+    }
+}
 
 // MARK: - Command Palette
 struct CommandPalette: View {
@@ -279,13 +411,20 @@ struct SidebarView: View {
     @EnvironmentObject var manager: MediaProcessingManager
     var body: some View {
         VStack(spacing: 0) {
+            // Glass header
             HStack(spacing: 8) {
-                Rectangle().fill(SX.accent).frame(width: 22, height: 22)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(SX.accent)
+                    .frame(width: 22, height: 22)
                     .overlay(Image(systemName: "waveform").font(.system(size: 11, weight: .bold)).foregroundColor(.white))
+                    .shadow(color: SX.glowRed, radius: 8, x: 0, y: 2)
                 Text("MEDIATRON").font(.system(size: 11, weight: .bold)).foregroundStyle(SX.textPrimary).tracking(2)
                 Spacer()
-            }.padding(.horizontal, 14).padding(.vertical, 10).background(SX.surface)
-            Divider()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(SX.glassMid)
+            .overlay(Rectangle().fill(SX.glassBorder).frame(height: 1), alignment: .bottom)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     SideSec(title: "PRESETS", icon: "square.grid.2x2") {
@@ -296,7 +435,10 @@ struct SidebarView: View {
                                         VStack(spacing: 2) {
                                             Image(systemName: preset.icon).font(.system(size: 13))
                                             Text(preset.name).font(.system(size: 8, weight: .medium)).lineLimit(1)
-                                        }.frame(width: 58, height: 42).background(Rectangle().fill(SX.surface).overlay(Rectangle().strokeBorder(SX.border)))
+                                        }
+                                        .frame(width: 58, height: 42)
+                                        .background(RoundedRectangle(cornerRadius: SX.rTile, style: .continuous).fill(SX.glassSoft))
+                                        .overlay(RoundedRectangle(cornerRadius: SX.rTile, style: .continuous).strokeBorder(SX.glassBorder, lineWidth: 1))
                                     }.buttonStyle(.plain)
                                 }
                             }
@@ -344,25 +486,47 @@ struct SidebarView: View {
                     }
                 }.padding(12)
             }
-            Divider()
-            VStack(spacing: 4) {
+
+            Rectangle().fill(SX.glassBorder).frame(height: 1)
+
+            // Premium footer — process action glass button
+            VStack(spacing: 6) {
                 Button {
                     Task { await manager.startProcessing() }
                 } label: {
                     HStack {
-                        Spacer(); Image(systemName: "play.fill").font(.system(size: 10))
-                        Text("PROCESS QUEUE").font(.system(size: 11, weight: .bold)).tracking(1); Spacer()
-                    }.padding(.vertical, 8)
-                }.buttonStyle(.borderedProminent).tint(SX.accent)
-                    .disabled(manager.isProcessing || manager.tasks.isEmpty)
-                    .keyboardShortcut(.return, modifiers: []).accessibilityLabel("Start processing")
+                        Spacer()
+                        Image(systemName: "play.fill").font(.system(size: 10))
+                        Text("PROCESS QUEUE").font(.system(size: 11, weight: .bold)).tracking(1)
+                        Spacer()
+                    }
+                    .padding(.vertical, 9)
+                    .background(
+                        ZStack {
+                            RoundedRectangle(cornerRadius: SX.rTile, style: .continuous).fill(SX.accent)
+                            RoundedRectangle(cornerRadius: SX.rTile, style: .continuous)
+                                .stroke(LinearGradient(colors: [Color.white.opacity(0.6), Color.white.opacity(0)], startPoint: .top, endPoint: .center), lineWidth: 1)
+                        }
+                    )
+                    .foregroundColor(.white)
+                    .shadow(color: SX.glowRed, radius: 10, x: 0, y: 4)
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isProcessing || manager.tasks.isEmpty)
+                .keyboardShortcut(.return, modifiers: [])
+                .accessibilityLabel("Start processing")
+                .opacity((manager.isProcessing || manager.tasks.isEmpty) ? 0.5 : 1.0)
+                .animation(SX.spLift, value: manager.tasks.count)
+
                 HStack {
                     Button("Clear") { manager.clearCompleted() }.font(.system(size: 10)).foregroundStyle(SX.textSecondary).buttonStyle(.plain)
                     Spacer()
                     Text("\(manager.tasks.count) files").font(.system(size: 9)).foregroundStyle(SX.textTertiary)
                 }
-            }.padding(.horizontal, 12).padding(.vertical, 8).background(SX.surface)
-        }.frame(minWidth: 240).background(SX.canvas)
+            }.padding(.horizontal, 12).padding(.vertical, 10).background(SX.glassMid)
+        }
+        .frame(minWidth: 248)
+        .background(SX.canvas)
     }
 }
 
@@ -394,11 +558,19 @@ struct MainAreaView: View {
     @EnvironmentObject var manager: MediaProcessingManager
     @State private var selected: UUID?
     var body: some View {
-        VStack(spacing: 0) {
-            ToolbarView(); Divider()
-            if manager.tasks.isEmpty { EmptyState() } else { TaskListView(selected: $selected) }
-            Divider(); StatusStrip()
-        }.background(SX.canvas)
+        ZStack {
+            MeshBackground(intensity: 0.6).ignoresSafeArea()
+            VStack(spacing: 0) {
+                ToolbarView()
+                Rectangle().fill(SX.glassBorder).frame(height: 1)
+                Group {
+                    if manager.tasks.isEmpty { EmptyState() }
+                    else { TaskListView(selected: $selected) }
+                }
+                Rectangle().fill(SX.glassBorder).frame(height: 1)
+                StatusStrip()
+            }
+        }
     }
 }
 
@@ -416,14 +588,21 @@ struct ToolbarView: View {
                     HStack(spacing: 3) {
                         Image(systemName: "folder.fill").font(.system(size: 8))
                         Text("Output").font(.system(size: 9, weight: .medium))
-                    }.foregroundStyle(SX.accent).padding(.horizontal, 7).padding(.vertical, 3).background(Rectangle().fill(SX.accentBg))
+                    }
+                    .foregroundStyle(SX.accent)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(SX.accentBg))
+                    .overlay(Capsule().strokeBorder(SX.accent.opacity(0.2), lineWidth: 1))
                 }.buttonStyle(.plain).help("Reveal output folder")
             }
             if manager.isProcessing {
                 HStack(spacing: 4) {
                     ProgressView(value: manager.overallProgress).progressViewStyle(.linear).frame(width: 80)
                     Text("\(Int(manager.overallProgress * 100))%").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(SX.accent)
-                }.padding(.horizontal, 8).padding(.vertical, 4).background(Rectangle().fill(SX.accentBg))
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Capsule().fill(SX.accentBg))
+                .overlay(Capsule().strokeBorder(SX.accent.opacity(0.2), lineWidth: 1))
             }
             Menu {
                 Button { let p = NSOpenPanel(); p.allowedContentTypes = [.mpeg4Movie]; p.allowsMultipleSelection = true; if p.runModal() == .OK { manager.addFiles(p.urls) } } label: { Label("Add Files", systemImage: "doc.badge.plus") }.keyboardShortcut("o")
@@ -432,96 +611,33 @@ struct ToolbarView: View {
                 Button { manager.clearCompleted() } label: { Label("Clear", systemImage: "trash") }
             } label: { Label("Add", systemImage: "plus.circle.fill").font(.system(size: 11)) }
                 .buttonStyle(.bordered).tint(SX.textSecondary).menuIndicator(.hidden).fixedSize()
-        }.padding(.horizontal, 16).padding(.vertical, 8).background(SX.surface)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(SX.glassMid)
     }
 }
 
 struct EmptyState: View {
     @State private var pulse = false
     var body: some View {
-        VStack(spacing: 12) {
-            Rectangle().fill(SX.surface).frame(width: 64, height: 64)
-                .overlay(Image(systemName: "film.stack").font(.system(size: 24, weight: .light)).foregroundStyle(SX.textTertiary))
-                .scaleEffect(pulse ? 1.03 : 1.0)
-                .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true), value: pulse)
-                .onAppear { pulse = true }
-            Text("No media in queue").font(.system(size: 14, weight: .medium)).foregroundStyle(SX.textSecondary)
-            Text("CmdO to open files").font(.system(size: 10)).foregroundStyle(SX.textTertiary)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct TaskListView: View {
-    @EnvironmentObject var manager: MediaProcessingManager
-    @Binding var selected: UUID?
-    var body: some View {
-        List(selection: $selected) {
-            ForEach(manager.tasks) { task in
-                TaskCard(task: task).listRowSeparator(.hidden).listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
-            }.onDelete { idx in for i in idx { manager.removeTask(manager.tasks[i]) } }
-        }.listStyle(.plain).scrollContentBackground(.hidden)
-    }
-}
-
-struct TaskCard: View {
-    let task: MediaTask
-    @EnvironmentObject var manager: MediaProcessingManager
-    @State private var hover = false
-    
-    var body: some View {
-        HStack(spacing: 10) {
-            Rectangle().fill(task.status.color.opacity(0.12)).frame(width: 34, height: 34)
-                .overlay(Image(systemName: task.status.icon).font(.system(size: 13, weight: .medium)).foregroundStyle(task.status.color)
-                    .symbolEffect(.bounce, options: .repeating, value: [.transcribing, .dubbing, .rendering].contains(task.status)))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(task.fileName).font(.system(size: 12, weight: .medium)).foregroundStyle(SX.textPrimary).lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(task.fileSizeFormatted).font(.system(size: 9)).foregroundStyle(SX.textSecondary)
-                    if let res = task.resolution { Text(res).font(.system(size: 8, weight: .medium)).foregroundStyle(SX.textSecondary) }
-                    if let codec = task.videoCodec, !codec.isEmpty { Text(codec).font(.system(size: 8)).foregroundStyle(SX.textTertiary) }
-                    if let lang = task.detectedLanguage { Text(lang).font(.system(size: 8)).padding(.horizontal, 4).padding(.vertical, 1).background(Rectangle().fill(SX.accentBg)).foregroundStyle(SX.accent) }
-                    if task.durationSeconds > 0 { Text(fd(task.durationSeconds)).font(.system(size: 9)).foregroundStyle(SX.textSecondary) }
-                }
-                if let outURL = task.outputURL, task.status == .completed {
-                    HStack(spacing: 3) {
-                        Image(systemName: "folder.fill").font(.system(size: 7)).foregroundStyle(SX.accent)
-                        Text(outURL.lastPathComponent).font(.system(size: 8, weight: .medium)).foregroundStyle(SX.accent).lineLimit(1)
-                        Button { NSWorkspace.shared.activateFileViewerSelecting([outURL]) } label: {
-                            Image(systemName: "arrow.right.circle.fill").font(.system(size: 10))
-                        }.buttonStyle(.plain).foregroundStyle(SX.accent)
-                    }
-                }
-                if task.status.isRunning {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Rectangle().fill(SX.border).frame(height: 3)
-                            Rectangle().fill(SX.accent).frame(width: max(3, geo.size.width * task.progress), height: 3)
-                                .animation(.easeInOut(duration: 0.25), value: task.progress)
-                        }
-                    }.frame(height: 3)
+        VStack(spacing: 16) {
+            GlassPanel(radius: 20, padding: 20) {
+                VStack(spacing: 12) {
+                    Image(systemName: "film.stack")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(SX.textTertiary)
+                        .symbolEffect(.pulse, options: .repeating, value: pulse)
+                    Text("No media in queue")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(SX.textPrimary)
+                    Text("⌘O to open files  ·  Drag & drop to import")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SX.textTertiary)
                 }
             }
-            Spacer()
-            HStack(spacing: 2) {
-                Circle().fill(task.status.color).frame(width: 4, height: 4)
-                Text(task.status.rawValue).font(.system(size: 9, weight: .medium)).foregroundStyle(task.status.color)
-            }.padding(.horizontal, 7).padding(.vertical, 2).background(Rectangle().fill(task.status.color.opacity(0.1)))
-            if [.queued, .completed, .failed].contains(task.status) {
-                Button { manager.removeTask(task) } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)) }
-                    .buttonStyle(.plain).foregroundStyle(SX.textTertiary).opacity(hover ? 1 : 0)
-            }
-        }.padding(.vertical, 5).padding(.horizontal, 10)
-            .background(Rectangle().fill(SX.surface).overlay(Rectangle().strokeBorder(hover ? SX.borderStrong : SX.border, lineWidth: hover ? 3 : 2)))
-            .onHover { hover = $0 }
-            .contextMenu {
-                if task.status == .completed, let out = task.outputURL { Button { NSWorkspace.shared.activateFileViewerSelecting([out]) } label: { Label("Show in Finder", systemImage: "folder") } }
-                Button { manager.removeTask(task) } label: { Label("Remove", systemImage: "trash") }
-            }.animation(SX.animSnap, value: hover)
-    }
-    
-    func fd(_ s: Double) -> String {
-        let h = Int(s) / 3600, m = (Int(s) % 3600) / 60, sec = Int(s) % 60
-        if h > 0 { return "\(h)h \(m)m" }; if m > 0 { return "\(m)m \(sec)s" }; return "\(sec)s"
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { pulse.toggle() }
     }
 }
 
@@ -536,9 +652,184 @@ struct StatusStrip: View {
             Text(manager.statusMessage).font(.system(size: 9)).foregroundStyle(SX.textSecondary).lineLimit(1)
             Spacer()
             Button { showLog.toggle() } label: { Text("LOG").font(.system(size: 8, weight: .bold)).tracking(1).foregroundStyle(showLog ? SX.accent : SX.textTertiary) }.buttonStyle(.plain)
-            Text("M-Series").font(.system(size: 7)).foregroundStyle(SX.textTertiary).padding(.horizontal, 5).padding(.vertical, 1).background(Rectangle().fill(SX.surface))
-        }.padding(.horizontal, 12).padding(.vertical, 5).background(SX.surface)
-            .sheet(isPresented: $showLog) { LogSheet() }
+            Text("M-Series")
+                .font(.system(size: 7))
+                .foregroundStyle(SX.textTertiary)
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(SX.glassSoft))
+                .overlay(Capsule().strokeBorder(SX.glassBorder, lineWidth: 1))
+        }
+        .padding(.horizontal, 12).padding(.vertical, 5)
+        .background(SX.glassMid)
+        .sheet(isPresented: $showLog) { LogSheet() }
+    }
+}
+
+struct TaskListView: View {
+    @EnvironmentObject var manager: MediaProcessingManager
+    @Binding var selected: UUID?
+    private let columns = [
+        GridItem(.adaptive(minimum: 280, maximum: 420), spacing: 10)
+    ]
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(manager.tasks) { task in
+                    TaskCard(task: task, isSelected: selected == task.id)
+                        .onTapGesture { selected = task.id }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .animation(SX.spLift, value: manager.tasks)
+        }
+        .contextMenu(forSelectionType: UUID.self) { items in
+            ForEach(Array(items), id: \.self) { id in
+                if let t = manager.tasks.first(where: { $0.id == id }) {
+                    Button { manager.removeTask(t) } label: { Label("Remove", systemImage: "trash") }
+                }
+            }
+        }
+    }
+}
+
+struct TaskCard: View {
+    let task: MediaTask
+    let isSelected: Bool
+    @EnvironmentObject var manager: MediaProcessingManager
+    @State private var hover = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Top row: icon + name + status pill
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(task.status.color.opacity(0.14))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: task.status.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(task.status.color)
+                        .symbolEffect(.bounce, options: .repeating,
+                                     value: [.transcribing, .dubbing, .rendering].contains(task.status))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(task.fileName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(SX.textPrimary)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(task.fileSizeFormatted).font(.system(size: 8)).foregroundStyle(SX.textSecondary)
+                        if let res = task.resolution {
+                            Text(res).font(.system(size: 8, weight: .medium)).foregroundStyle(SX.textSecondary)
+                        }
+                        if task.durationSeconds > 0 {
+                            Text(fd(task.durationSeconds)).font(.system(size: 8)).foregroundStyle(SX.textTertiary)
+                        }
+                    }
+                }
+                Spacer()
+                StatusPill(icon: task.status.icon, text: task.status.rawValue, color: task.status.color)
+            }
+
+            // Meta row
+            HStack(spacing: 4) {
+                if let lang = task.detectedLanguage {
+                    Text(lang)
+                        .font(.system(size: 8, weight: .semibold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Capsule().fill(SX.accentBg))
+                        .foregroundStyle(SX.accent)
+                }
+                if let codec = task.videoCodec, !codec.isEmpty {
+                    Text(codec)
+                        .font(.system(size: 8)).foregroundStyle(SX.textTertiary)
+                }
+                Spacer()
+                if [.queued, .completed, .failed].contains(task.status) {
+                    Button { manager.removeTask(task) } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                    }.buttonStyle(.plain).foregroundStyle(SX.textTertiary)
+                        .opacity(hover ? 1 : 0.4)
+                }
+            }
+
+            // Output link for completed
+            if let outURL = task.outputURL, task.status == .completed {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([outURL])
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "folder.fill").font(.system(size: 7))
+                        Text(outURL.deletingLastPathComponent().lastPathComponent).font(.system(size: 8, weight: .medium))
+                        Image(systemName: "arrow.right.circle.fill").font(.system(size: 9))
+                    }
+                    .foregroundStyle(SX.accent)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(SX.accentBg))
+                    .overlay(Capsule().strokeBorder(SX.accent.opacity(0.2), lineWidth: 1))
+                }.buttonStyle(.plain)
+            }
+
+            // Progress bar
+            if task.status.isRunning {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(SX.border.opacity(0.4))
+                            .frame(height: 4)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(LinearGradient(
+                                colors: [SX.accent, SX.accent.opacity(0.7)],
+                                startPoint: .leading, endPoint: .trailing))
+                            .frame(width: max(4, geo.size.width * CGFloat(task.progress)), height: 4)
+                            .animation(.easeInOut(duration: 0.25), value: task.progress)
+                            .shadow(color: SX.accent.opacity(0.3), radius: 3)
+                    }
+                }.frame(height: 4)
+            }
+        }
+        .padding(12)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: SX.rTile, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: SX.rTile, style: .continuous)
+                    .fill(Color.white.opacity(hover ? 0.75 : 0.55))
+                RoundedRectangle(cornerRadius: SX.rTile, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                isSelected ? SX.accent.opacity(0.5) : SX.glassEdge,
+                                Color.white.opacity(0.0)
+                            ],
+                            startPoint: .top, endPoint: .bottom),
+                        lineWidth: isSelected ? 1.5 : 1
+                    )
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SX.rTile, style: .continuous)
+                .strokeBorder(isSelected ? SX.accent.opacity(0.6) : SX.glassBorder, lineWidth: 1)
+        )
+        .scaleEffect(hover ? 1.015 : 1.0)
+        .shadow(color: hover ? SX.glowRed : Color.clear, radius: hover ? 16 : 0, x: 0, y: hover ? 6 : 0)
+        .shadow(color: SX.glowSoft, radius: 4, x: 0, y: 2)
+        .onHover { hover = $0 }
+        .animation(SX.spLift, value: hover)
+        .contextMenu {
+            if task.status == .completed, let out = task.outputURL {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([out]) } label: {
+                    Label("Show in Finder", systemImage: "folder") }
+            }
+            Button { manager.removeTask(task) } label: {
+                Label("Remove", systemImage: "trash") }
+        }
+    }
+
+    func fd(_ s: Double) -> String {
+        let h = Int(s) / 3600, m = (Int(s) % 3600) / 60, sec = Int(s) % 60
+        if h > 0 { return "\(h)h \(m)m" }; if m > 0 { return "\(m)m \(sec)s" }; return "\(sec)s"
     }
 }
 
