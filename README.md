@@ -15,29 +15,48 @@ Mediatron is a native macOS application that processes video files using the ful
 
 **Swiss International Style × Framer Premium UX**
 
-Built on a hybrid design system: Swiss minimalism structure (white canvas, #FF3000 accent, uppercase labels, tracking-2) layered with Framer-style premium surfaces:
+Built on a hybrid design system: Swiss minimalism structure (white canvas, #FF3000 accent, uppercase labels, tracking-2) layered with Framer-style premium surfaces and rich backgrounds:
 
 | Feature | Implementation |
 |---------|----------------|
-| Animated Mesh Background | TimelineView + 3 drifting radial gradient blobs (`meshA`, `meshB`, `meshC`) + `.ultraThinMaterial` grain overlay |
-| Glass Morphism Panels | `GlassPanel` component: `.ultraThinMaterial` + translucent white layers (`glassSoft`: 55%, `glassMid`: 78%, `glassHard`: 94% opacity) + inner highlight gradient + outer border (`glassBorder`: 6% black) |
+| Animated Backgrounds | 6 selectable themes: **Mesh** (drifting gradient blobs), **Cyber** (80s perspective neon grid + sun glow), **Retro** (cutting-mat green grid), **Fractal** (noise-based color morph), **Liquid** (metallic sheen), **Aurora** (northern lights waves) |
+| Theme Switching | `ThemePickerChip` in status strip, or **⌘/** to cycle, persisted via `@AppStorage("bgTheme")` |
+| Logo Preloader | `LogoPreloader` — cinematic pulsing brand mark with animated halo ring |
+| Split Text Reveal | `SplitTextReveal` — character-by-character staggered spring animation |
+| Hourglass Loader | `HourglassLoader` — rotating hourglass with symbol pulse, shown during processing |
+| Animated Counter | `AnimatedCounter` — smoothly interpolating number display for progress |
+| Glass Morphism Panels | `GlassPanel` component: `.ultraThinMaterial` + translucent white layers + inner highlight gradient + outer border |
 | Bento-Style Grid | `LazyVGrid` with adaptive columns (280–420px), 10px spacing |
-| Hover-Lift Cards | 1.015x scale + accent-glow shadow (radius 16, `glowRed`: `SX.accent.opacity(0.2)`) + premium spring (`spLift`: response 0.42, damping 0.78) |
+| Hover-Lift Cards | 1.015x scale + accent-glow shadow + `spLift` spring (0.42/0.78) |
 | Status Pills | `StatusPill`: capsule-shaped with icon + status color (border + tint) |
-| Gradient Progress Bars | Linear gradient fill (`SX.accent` → `SX.accent.opacity(0.7)`) + glow shadow (`SX.accent.opacity(0.3)`) |
-| Micro-Rounded Surfaces | `rControl: 8`, `rCard: 10`, `rPanel: 18`, `rTile: 14`, `rPill: 999` continuous corner radii |
-| Cinematic Entrance | Flying logo (spring-animated Y-offset + rotation), particle orbs with phase-based opacity, staggered character reveals |
+| Gradient Progress Bars | Linear gradient fill + accent glow shadow |
+| Micro-Rounded Surfaces | `rControl: 8`, `rCard: 10`, `rPanel: 18`, `rTile: 14`, `rPill: 999` |
 | Command Palette | ⌘K fuzzy-search with monospaced shortcut hints |
-| Fixed Window Constraints | Minimum 1100×720, ideal 1280×860 (prevents overflow) |
+| Fixed Window Constraints | Min 1100×720, ideal 1280×860 (prevents overflow) |
+| Dark-Theme Adaptation | Automatic light veil for dark backgrounds (cyber, aurora) keeps text readable |
 
 ### Premium Components
 
 | Component | Purpose |
 |-----------|---------|
 | `MeshBackground` | Animated drifting radial gradients with `.ultraThinMaterial` overlay |
+| `CyberGridBackground` | Retro 80s perspective grid with neon lines + sun glow at horizon |
+| `RetroGridBackground` | Cutting mat wallpaper (green grid on white) |
+| `FractalGlassBackground` | Slowly morphing color blobs + fine noise dots |
+| `LiquidMetalBackground` | Flowing metallic sheen (gradient + highlight blobs, blends) |
+| `AuroraBackground` | Northern lights — soft animated wave bands with screen blend |
 | `GlassPanel<Content>` | Translucent panel with inner highlight gradient + outer border |
 | `HoverLift<Content>` | Wrapper that adds scale + glow shadow on hover |
-| `StatusPill` | Capsule with icon + text + color (border + tint) |
+| `StatusPill` | Capsule with icon + text + color |
+| `SplitTextReveal` | Staggered character-by-character text reveal |
+| `ArcText` | Text arranged along circular arc |
+| `AnimatedCounter` | Smoothly interpolating number display |
+| `HourglassLoader` | Rotating hourglass animation |
+| `LogoPreloader` | Cinematic pulsing brand mark with halo |
+| `KineticNav` | Animated active-tab indicator nav |
+| `ScrollProgressIndicator` | Thin gradient scroll-progress bar |
+| `LiquidMetalView` | Shimmer overlay for surfaces |
+| `ThemePickerChip` | One-tap theme cycle pill |
 
 ### Performance Benchmarks
 | Input | Output | Time |
@@ -170,6 +189,7 @@ Processing is **sequential**: one file fully completes all active stages before 
 | **⌘O** | Open media files |
 | **⌘⇧O** | Import folder |
 | **⌘K** | Command palette |
+| **⌘/** | Cycle background theme |
 | **⌘Enter** | Start processing |
 | **⌘,** | Preferences |
 | **⌘Q** | Quit |
@@ -180,12 +200,13 @@ Processing is **sequential**: one file fully completes all active stages before 
 
 ### File Structure
 ```
-App.swift            — Entry point, AppDelegate, MenuBarExtra, ContentView
-Engine.swift         — MediaProcessingManager, PipelineEngine, ShellRunner, DependencyBootstrapper
-Views.swift          — All UI views, SX design tokens, premium components (MeshBackground, GlassPanel, HoverLift, StatusPill)
-Models.swift         — MediaTask, ProcessingOptions, ProcessingPreset
-LiquidWindow.swift   — Custom NSWindow subclass (corner radius, transparency)
-LiquidShader.metal   — Metal shader for liquid gradient background
+App.swift              — Entry point, AppDelegate, MenuBarExtra, ContentView
+Engine.swift           — MediaProcessingManager, PipelineEngine, ShellRunner, DependencyBootstrapper
+Views.swift            — Main UI views, SX design tokens, premium card components
+FramerComponents.swift — Background themes, Framer-style components (LogoPreloader, SplitTextReveal, HourglassLoader, AnimatedCounter, ArcText, KineticNav, etc.)
+Models.swift           — MediaTask, ProcessingOptions, ProcessingPreset
+LiquidWindow.swift     — Custom NSWindow subclass (corner radius, transparency)
+LiquidShader.metal     — Metal shader for liquid gradient background
 ```
 
 ### Building
@@ -196,7 +217,7 @@ swiftc -O \
   -framework SwiftUI -framework AppKit -framework Foundation \
   -framework Combine -framework AVFoundation -framework UniformTypeIdentifiers \
   -o MediatronBinary \
-  Models.swift Engine.swift Views.swift App.swift LiquidWindow.swift
+  Models.swift Engine.swift FramerComponents.swift Views.swift App.swift LiquidWindow.swift
 ```
 
 Or use the quickbuild script:
@@ -239,10 +260,31 @@ bash sign_and_notarize.sh
 
 ## Screenshots
 
-- **Welcome**: cinematic entrance with flying logo, particle orbs, staggered spring reveals
-- **Queue**: bento-style card grid with animated mesh background, glassmorphic panels
-- **Processing**: live progress bars with gradient fill and glow shadows, accent status pills
-- **Complete**: clickable output paths with folder reveal buttons
+### Welcome (cinematic entrance)
+- Flying logo with halo ring animation (pulsing spring)
+- Split text "MEDIATRON" reveals character-by-character
+- Staggered particle orb reveals around the logo
+- Background adapts to chosen theme (Mesh default)
+
+### Queue (bento grid)
+- Adaptive grid of glass cards (280–420px wide)
+- Hover-lift on every card with accent glow shadow
+- Capsule status pills + gradient progress bars + folder reveal chips
+
+### Processing
+- Rotating HourglassLoader in status strip
+- Animated percentage counter that smoothly tracks overall progress
+- Live status pills with status-color bounce symbols
+
+### Background Themes (press ⌘/ to cycle)
+| Theme | Vibe |
+|-------|------|
+| **Mesh** | Soft drifting gradient blobs — calm, premium |
+| **Cyber** | Retro 80s neon horizon grid with sun glow |
+| **Retro** | Green cutting-mat wallpaper |
+| **Fractal** | Slowly morphing color blobs with fine-noise grain |
+| **Liquid** | Flowing metallic sheen |
+| **Aurora** | Northern lights wave bands |
 
 ---
 
