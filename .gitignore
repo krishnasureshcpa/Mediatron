@@ -1,0 +1,8 @@
+# Temp files
+*.tmp
+*.bak
+dmg_staging/
+.hermes-tmp.*
+
+# macOS
+.DS_Store
