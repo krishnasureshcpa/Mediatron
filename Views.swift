@@ -435,6 +435,7 @@ struct Pill: View {
 }
 
 struct DropTargetView: View {
+    @EnvironmentObject var manager: MediaProcessingManager
     @State private var targeted = false
     var body: some View {
         VStack(spacing: 12) {
@@ -442,12 +443,25 @@ struct DropTargetView: View {
                 .foregroundStyle(targeted ? SX.accent : SX.textTertiary).symbolEffect(.bounce, value: targeted)
             Text("Drop media files here").font(.system(size: 13, weight: .medium))
                 .foregroundStyle(targeted ? SX.accent : SX.textSecondary)
-            Text("MP4, MKV, MOV, AVI, WebM — up to 8K").font(.system(size: 10)).foregroundStyle(SX.textTertiary)
+            Text("MP4, MKV, MOV, AVI, WebM — auto-starts processing").font(.system(size: 10)).foregroundStyle(SX.textTertiary)
         }.frame(maxWidth: 400, minHeight: 110)
             .background(Rectangle().fill(targeted ? SX.accentBg : SX.surface)
                 .overlay(Rectangle().strokeBorder(targeted ? SX.accent : SX.border, style: StrokeStyle(lineWidth: targeted ? 3 : 2, dash: targeted ? [] : [5, 4]))))
             .scaleEffect(targeted ? 1.02 : 1).animation(SX.animSnap, value: targeted)
-            .onDrop(of: [.fileURL], isTargeted: $targeted) { _ in true }
+            .onDrop(of: [.fileURL], isTargeted: $targeted) { providers in
+                for p in providers {
+                    _ = p.loadObject(ofClass: URL.self) { url, _ in
+                        guard let url = url else { return }
+                        var isDir: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                            DispatchQueue.main.async { manager.addFolder(url) }
+                        } else {
+                            DispatchQueue.main.async { manager.addFiles([url]) }
+                        }
+                    }
+                }
+                return true
+            }
     }
 }
 
@@ -817,7 +831,7 @@ struct TaskCard: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(task.status.color)
                         .symbolEffect(.bounce, options: .repeating,
-                                     value: [.transcribing, .dubbing, .rendering].contains(task.status))
+                                     value: [.transcribing, .dubbing, .rendering, .separating, .stabilizing, .denoising, .upscaling, .analyzing, .validating].contains(task.status))
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(task.fileName)
@@ -883,22 +897,47 @@ struct TaskCard: View {
                 }.buttonStyle(.plain)
             }
 
-            // Progress bar
+            // Progress bar + ETA
             if task.status.isRunning {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(SX.border.opacity(0.4))
-                            .frame(height: 4)
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: [SX.accent, SX.accent.opacity(0.7)],
-                                startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(4, geo.size.width * CGFloat(task.progress)), height: 4)
-                            .animation(.easeInOut(duration: 0.25), value: task.progress)
-                            .shadow(color: SX.accent.opacity(0.3), radius: 3)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        // Stage label
+                        Text(task.status.rawValue.uppercased())
+                            .font(.system(size: 7, weight: .bold)).tracking(0.8)
+                            .foregroundStyle(task.status.color)
+                        Spacer()
+                        // Live countdown
+                        if task.etaSeconds > 0 {
+                            HStack(spacing: 2) {
+                                Image(systemName: "clock").font(.system(size: 7))
+                                Text(etaLabel(task.etaSeconds))
+                                    .font(.system(size: 7, weight: .semibold)).monospacedDigit()
+                                Text("remaining")
+                                    .font(.system(size: 7))
+                            }
+                            .foregroundStyle(SX.textSecondary)
+                        }
                     }
-                }.frame(height: 4)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(SX.border.opacity(0.4)).frame(height: 4)
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(LinearGradient(colors: [SX.accent, SX.accent.opacity(0.7)],
+                                                     startPoint: .leading, endPoint: .trailing))
+                                .frame(width: max(4, geo.size.width * CGFloat(task.progress)), height: 4)
+                                .animation(.easeInOut(duration: 0.25), value: task.progress)
+                                .shadow(color: SX.accent.opacity(0.3), radius: 3)
+                        }
+                    }.frame(height: 4)
+                }
+            } else if task.status == .queued, task.etaSeconds > 0 {
+                // Queued task: show "starts in ~Xm" so user sees how long the wait is
+                HStack(spacing: 3) {
+                    Image(systemName: "hourglass").font(.system(size: 7))
+                    Text("Starts in ~\(etaLabel(task.etaSeconds))")
+                        .font(.system(size: 7, weight: .medium)).monospacedDigit()
+                }.foregroundStyle(SX.textTertiary)
             }
         }
         .padding(12)
@@ -942,6 +981,15 @@ struct TaskCard: View {
     func fd(_ s: Double) -> String {
         let h = Int(s) / 3600, m = (Int(s) % 3600) / 60, sec = Int(s) % 60
         if h > 0 { return "\(h)h \(m)m" }; if m > 0 { return "\(m)m \(sec)s" }; return "\(sec)s"
+    }
+
+    /// Format ETA for display: always shows two components so the timer doesn't jump around.
+    func etaLabel(_ s: Double) -> String {
+        let total = max(0, Int(s))
+        let h = total / 3600, m = (total % 3600) / 60, sec = total % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(String(format: "%02d", sec))s" }
+        return "\(sec)s"
     }
 }
 

@@ -94,8 +94,10 @@ final class MediaProcessingManager: ObservableObject {
         }
         if phase == .welcome { phase = .ready }
         addLog(.queued, "Added \(urls.count) file(s)")
-        // Auto-detect language in background for new files
-        Task { await autoDetectLanguages() }
+        Task {
+            await autoDetectLanguages()
+            autoStartIfNeeded()
+        }
     }
     
     func addFolder(_ url: URL) {
@@ -115,8 +117,10 @@ final class MediaProcessingManager: ObservableObject {
         }
         if phase == .welcome { phase = .ready }
         addLog(.queued, "Imported \(mediaURLs.count) media files")
-        // Auto-detect language in background
-        Task { await autoDetectLanguages() }
+        Task {
+            await autoDetectLanguages()
+            autoStartIfNeeded()
+        }
     }
     
     /// Auto-detect source language for all queued tasks without a detected language
@@ -136,10 +140,8 @@ final class MediaProcessingManager: ObservableObject {
                 // Keep nil — user can set manually or it'll detect during transcription
                 addLog(.detecting, "[\(task.fileName)] Could not detect — will auto-detect during transcribe")
             }
-            // Restore queued status
-            if tasks[idx].detectedLanguage != nil {
-                await updateStatus(at: idx, to: .queued)
-            }
+            // Always restore to queued — detection is optional, never a blocker
+            await updateStatus(at: idx, to: .queued)
         }
     }
     
@@ -152,7 +154,14 @@ final class MediaProcessingManager: ObservableObject {
         tasks.removeAll { $0.status == .completed || $0.status == .failed }
         if tasks.isEmpty { phase = .welcome }
     }
-    
+
+    /// Auto-start processing when files are added via drag-and-drop or file picker,
+    /// unless a run is already in progress.
+    func autoStartIfNeeded() {
+        guard !isProcessing, tasks.contains(where: { $0.status == .queued }) else { return }
+        Task { await startProcessing() }
+    }
+
     func startProcessing() async {
         guard !isProcessing else { return }
         isProcessing = true
@@ -200,7 +209,37 @@ final class MediaProcessingManager: ObservableObject {
         await updateMeta(at: index, duration: info.duration)
         await updateCodec(at: index, codec: info.videoCodec, res: "\(Int(info.resolution.width))×\(Int(info.resolution.height))", bitrate: info.bitrate)
         addLog(.analyzing, "[\(task.fileName)] \(info.videoCodec) \(Int(info.resolution.width))×\(Int(info.resolution.height)), \(formatDuration(info.duration))")
-        
+
+        // ── ETA estimation (per-stage cost model, benchmarked on M-series) ──
+        let dur = info.duration
+        var etaSecs = dur * 0.15  // baseline ffmpeg passthrough ~0.15× realtime
+        if options.enableStabilization  { etaSecs += dur * 0.20 }
+        if options.enableDenoise        { etaSecs += dur * (options.processingQuality == .studio ? 1.5 : 0.35) }
+        if options.enableSubtitles || options.enableDubbing { etaSecs += dur * 1.2 } // whisper large-v3
+        if options.enableStemSeparation { etaSecs += dur * 0.5 }  // Demucs ~0.5× realtime on MPS
+        if options.enableUpscaling {
+            switch options.upscaleEngine {
+            case .metalFX:    etaSecs += dur * 0.4
+            case .realESRGAN: etaSecs += dur * 8.0  // per-frame ML — very slow
+            }
+        }
+        etaSecs = max(etaSecs, 5)  // floor
+        await updateETA(at: index, total: etaSecs, remaining: etaSecs)
+        // Also update queued files that come after this one so their ETA shows in the queue.
+        rebuildQueueETAs(startingAfter: index)
+
+        // Start a 1-Hz countdown ticker that decrements etaSeconds while the task runs.
+        let etaTask = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self = self, let idx = self.tasks.firstIndex(where: { $0.id == task.id }) else { break }
+                guard self.tasks[idx].status.isRunning else { break }
+                let remaining = max(0, self.tasks[idx].etaSeconds - 1)
+                self.tasks[idx].etaSeconds = remaining
+            }
+        }
+        defer { etaTask.cancel() }
+
         // Task-scoped scratch dir (holds Demucs stems for the lifetime of this task).
         let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("mediatron-\(task.id.uuidString)")
         defer { try? FileManager.default.removeItem(at: workDir) }
@@ -277,6 +316,27 @@ final class MediaProcessingManager: ObservableObject {
     @MainActor private func updateStarted(at index: Int) {
         guard index < tasks.count else { return }
         tasks[index].startedAt = Date()
+    }
+
+    @MainActor private func updateETA(at index: Int, total: Double, remaining: Double) {
+        guard index < tasks.count else { return }
+        tasks[index].estimatedTotalSeconds = total
+        tasks[index].etaSeconds = remaining
+    }
+
+    /// Recalculate the queue ETA shown on each pending task after `fromIndex`.
+    /// Each queued task's etaSeconds is set to the sum of ETAs of all tasks before it
+    /// (currently running + queued ahead), so the card can show "starts in ~Xm".
+    @MainActor private func rebuildQueueETAs(startingAfter fromIndex: Int) {
+        var runningETA: Double = 0
+        for i in 0..<tasks.count {
+            if tasks[i].status.isRunning {
+                runningETA += tasks[i].etaSeconds
+            } else if tasks[i].status == .queued, i > fromIndex {
+                tasks[i].etaSeconds = runningETA
+                runningETA += tasks[i].estimatedTotalSeconds > 0 ? tasks[i].estimatedTotalSeconds : 60
+            }
+        }
     }
     
     @MainActor private func updateCompleted(at index: Int, outputURL: URL, elapsed: TimeInterval) {

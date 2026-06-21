@@ -148,6 +148,8 @@ struct MediaTask: Identifiable, Equatable, Codable {
     var startedAt: Date?
     var completedAt: Date?
     var isPaused: Bool = false
+    var estimatedTotalSeconds: Double = 0   // set once we know duration + options
+    var etaSeconds: Double = 0              // counts down during processing; updated by engine
     
     init(id: UUID = UUID(), sourceURL: URL, relativePath: String = "", status: TaskStatus = .queued) {
         self.id = id
