@@ -33,6 +33,7 @@ cat > Mediatron.app/Contents/Info.plist << 'PLIST'
 </plist>
 PLIST
 cp Mediatron.entitlements Mediatron.app/Contents/ 2>/dev/null
+cp setup_engines.sh Mediatron.app/Contents/Resources/ 2>/dev/null
 
 rm -f MediatronBinary
 swiftc -O -sdk $(xcrun --show-sdk-path --sdk macosx) \

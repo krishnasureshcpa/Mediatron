@@ -9,7 +9,22 @@
 
 ## About
 
-Mediatron is a native macOS application that processes video files using the full power of Apple Silicon — FFmpeg with VideoToolbox hardware encode, whisper.cpp for neural transcription, and ffprobe for integrity validation. No cloud uploads. No telemetry. No analytics. Your media stays on your Mac.
+Mediatron is a native macOS application that processes video files using the full power of Apple Silicon — FFmpeg with VideoToolbox hardware encode, whisper.cpp for neural transcription **and translation**, Demucs for audio stem separation, and Real-ESRGAN / MetalFX for upscaling. No cloud uploads. No telemetry. No analytics. Your media stays on your Mac.
+
+### Capabilities
+
+| Capability | Engine | Notes |
+|------------|--------|-------|
+| **Transcription + Subtitles** | whisper.cpp (large-v3) | 99 languages, auto-detect, SRT output |
+| **Translate → English dub** | whisper.cpp `-tr` + Apple Neural TTS (`say`) | Source speech is translated to English, then voiced. Whisper translates *to English only*. |
+| **Stem separation** | Demucs | Splits dialogue from music/SFX; the new dub is mixed **over the preserved background** instead of replacing it |
+| **Stabilization** | FFmpeg `deshake` | Reduces camera shake / gate weave |
+| **Denoise** | FFmpeg `hqdn3d` (balanced) / `nlmeans` (studio) | Removes grain / sensor noise before upscaling |
+| **Upscaling — fast** | MetalFX (`fx-upscale`) | GPU upscale to 4K/8K, default |
+| **Upscaling — quality** | Real-ESRGAN (ncnn-vulkan) | Per-frame ML upscale; much higher quality but **slow & disk-heavy** |
+| **Integrity validation** | ffprobe | Confirms valid duration/streams on every output |
+
+> **Honesty note:** *Lip-Sync* and *Voice Cloning* toggles are experimental placeholders — there is no production-grade local model wired for them yet, so they are intentionally **not** faked. Everything else above is real and runs entirely on-device.
 
 ### Visual Language
 
@@ -96,8 +111,18 @@ bash quickbuild.sh
 open Mediatron.app
 ```
 
-### Dependencies
-FFmpeg v8+ and whisper.cpp auto-installed via Settings → Engines → Install Engines.
+### Dependencies (auto-installed)
+Run `bash setup_engines.sh` or use **Settings → Engines → Install Engines** in the app. This installs all on-device engines:
+
+| Engine | What it does |
+|--------|-------------|
+| FFmpeg + ffprobe | Video decode/encode/stabilize/denoise (VideoToolbox HW) |
+| whisper.cpp + large-v3 model (~3 GB) | Speech-to-text + translation |
+| Demucs 4.0 (Python venv) | Dialogue / music+SFX stem separation |
+| Real-ESRGAN ncnn-vulkan + models | ML frame upscaling |
+| MetalFX (`fx-upscale`) | Fast GPU upscaling |
+
+All engines run 100% on-device. No API keys, no cloud, no subscriptions.
 
 ---
 
@@ -105,9 +130,15 @@ FFmpeg v8+ and whisper.cpp auto-installed via Settings → Engines → Install E
 1. Launch Mediatron
 2. Drag video files or folders onto the drop zone, or use **⌘O** / **⌘⇧O**
 3. Select a preset: **Web Optimized**, **Cinema Dub 4K**, **Transcribe Only**, **8K Master**
-4. Toggle options: dubbing, lip-sync, voice cloning, upscaling, subtitles
+4. Toggle options in the sidebar:
+   - **Auto-Dub** — transcribe + translate to English + Apple Neural TTS voice
+   - **Separate Stems** — isolate dialogue so the original music/SFX is preserved under the dub
+   - **Stabilize** — reduce camera shake with `deshake`
+   - **Denoise** — remove grain/sensor noise (`hqdn3d` / `nlmeans`)
+   - **AI Upscaling** — choose MetalFX (fast) or Real-ESRGAN (slow, ML quality) + target 4K/8K
+   - **Generate Subtitles** — embedded SRT from whisper
 5. Press **⌘Enter** or click **PROCESS QUEUE**
-6. Files process **one at a time** (sequential) with live progress
+6. Files process **one at a time** (sequential) with live stage-by-stage progress
 7. Completed files show clickable output paths with Finder reveal
 
 ### Output Location
@@ -118,14 +149,22 @@ Processed files save next to the source file as `filename_dubbed.mp4`. Enable **
 ## Pipeline Architecture
 ```
 Input File
-  → Stage 1: ffprobe (duration, codec, resolution, bitrate)
-  → Stage 2: whisper.cpp (language detection, SRT generation)
-  → Stage 3: ffmpeg + VideoToolbox (upscale, encode, audio, subtitles)
-  → Stage 4: ffprobe integrity check (duration validation)
-  → Output: clickable file that opens in Finder
+  → Stage 1:  ffprobe          — duration, codec, resolution, bitrate
+  → Stage 2a: Demucs           — [optional] split dialogue / music+SFX stems
+  → Stage 2b: whisper.cpp      — transcription + auto language detect
+                                 + translate→EN (-tr) when dubbing to English
+  → Stage 3a: FFmpeg deshake   — [optional] camera stabilization pre-pass
+  → Stage 3b: FFmpeg hqdn3d    — [optional] denoise pre-pass (nlmeans in studio mode)
+  → Stage 3c: Real-ESRGAN      — [optional] per-frame ML upscale (slow, high quality)
+           or MetalFX           — [optional] fast GPU upscale (default)
+  → Stage 3d: Apple TTS (say)  — [if dubbing] English neural voice synthesis
+  → Stage 3e: FFmpeg mux       — encode (VideoToolbox h264/hevc) + mix audio
+                                 (dubbed dialogue amix over preserved background stem)
+  → Stage 4:  ffprobe          — integrity check (duration validation)
+  → Output: file next to source, clickable to reveal in Finder
 ```
 
-Processing is **sequential**: one file fully completes all active stages before the next starts. This prevents resource contention on Apple Silicon.
+Processing is **sequential**: one file completes all stages before the next starts, preventing resource contention and thermal throttling on Apple Silicon.
 
 ---
 
@@ -202,11 +241,17 @@ Processing is **sequential**: one file fully completes all active stages before 
 ```
 App.swift              — Entry point, AppDelegate, MenuBarExtra, ContentView
 Engine.swift           — MediaProcessingManager, PipelineEngine, ShellRunner, DependencyBootstrapper
+                         ├── separateStems()        Demucs two-stems vocal isolation
+                         ├── transcribeAudio()      whisper-cli + -tr translate flag
+                         ├── upscaleWithRealESRGAN() frame-extract → realesrgan-ncnn-vulkan → reassemble
+                         └── renderOutput()         stabilize/denoise pre-pass → upscale → VideoToolbox encode → amix mux
 Views.swift            — Main UI views, SX design tokens, premium card components
 FramerComponents.swift — Background themes, Framer-style components (LogoPreloader, SplitTextReveal, HourglassLoader, AnimatedCounter, ArcText, KineticNav, etc.)
-Models.swift           — MediaTask, ProcessingOptions, ProcessingPreset
+Models.swift           — MediaTask, ProcessingOptions (upscaleEngine, enableStabilization, enableDenoise, enableStemSeparation), ProcessingPreset
 LiquidWindow.swift     — Custom NSWindow subclass (corner radius, transparency)
-LiquidShader.metal     — Metal shader for liquid gradient background
+setup_engines.sh       — Idempotent installer for all on-device engines (run once or via Settings)
+quickbuild.sh          — Compile + assemble .app bundle (no Xcode required)
+ship.sh                — quickbuild + copy to /Applications + ~/Applications + create .dmg
 ```
 
 ### Building
