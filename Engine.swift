@@ -201,30 +201,57 @@ final class MediaProcessingManager: ObservableObject {
         await updateCodec(at: index, codec: info.videoCodec, res: "\(Int(info.resolution.width))×\(Int(info.resolution.height))", bitrate: info.bitrate)
         addLog(.analyzing, "[\(task.fileName)] \(info.videoCodec) \(Int(info.resolution.width))×\(Int(info.resolution.height)), \(formatDuration(info.duration))")
         
-        // ── Stage 2: Transcribe (real whisper.cpp if model available) ──
+        // Task-scoped scratch dir (holds Demucs stems for the lifetime of this task).
+        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("mediatron-\(task.id.uuidString)")
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        // ── Stage 2a: Stem separation (Demucs) — isolate dialogue, keep music/SFX ──
+        var stems: PipelineEngine.Stems?
+        if options.enableStemSeparation && (options.enableDubbing || options.enableSubtitles) {
+            await updateStatus(at: index, to: .separating)
+            statusMessage = "Separating stems \(task.fileName)..."
+            addLog(.separating, "[\(task.fileName)] Demucs: isolating dialogue from music/SFX...")
+            stems = await engine.separateStems(task.sourceURL, into: workDir)
+            if stems != nil {
+                addLog(.separating, "[\(task.fileName)] Stems ready — dialogue isolated, background preserved")
+            } else {
+                addLog(.separating, "[\(task.fileName)] Stem separation unavailable — using full mix")
+            }
+        }
+
+        // ── Stage 2b: Transcribe (+translate-to-English) with real whisper.cpp ──
         if options.enableSubtitles || options.enableDubbing {
             await updateStatus(at: index, to: .transcribing)
-            addLog(.transcribing, "[\(task.fileName)] Speech-to-text...")
-            if let transcript = await engine.transcribeAudio(task.sourceURL, language: info.audioLanguage ?? "auto") {
+            // whisper can only translate *to* English. Enable when dubbing to English.
+            let wantTranslate = options.enableDubbing && options.targetLanguage.lowercased().hasPrefix("en")
+            addLog(.transcribing, "[\(task.fileName)] Speech-to-text\(wantTranslate ? " + translate→EN" : "")...")
+            if let transcript = await engine.transcribeAudio(
+                task.sourceURL,
+                language: info.audioLanguage ?? options.sourceLanguage,
+                translateToEnglish: wantTranslate,
+                audioInput: stems?.vocals
+            ) {
                 if let lang = transcript.detectedLanguage { await updateLang(at: index, language: lang) }
                 lastTranscriptText = transcript.text
                 addLog(.transcribing, "[\(task.fileName)] \(transcript.detectedLanguage ?? "?") — \(transcript.text.prefix(60))...")
             }
         }
-        
-        // ── Stage 3: Render with ffmpeg (all-in-one: upscale + encode + audio + subtitles) ──
+
+        // ── Stage 3: Render with ffmpeg (clean → upscale → encode → mux + subtitles) ──
         await updateStatus(at: index, to: .rendering)
         statusMessage = "Rendering \(task.fileName)..."
-        if options.enableUpscaling { addLog(.rendering, "[\(task.fileName)] Upscaling to \(options.upscaleTarget.rawValue)...") }
+        if options.enableStabilization { addLog(.stabilizing, "[\(task.fileName)] Stabilizing (deshake)...") }
+        if options.enableDenoise { addLog(.denoising, "[\(task.fileName)] Denoising...") }
+        if options.enableUpscaling { addLog(.rendering, "[\(task.fileName)] Upscaling to \(options.upscaleTarget.rawValue) via \(options.upscaleEngine.label)...") }
         if options.enableDubbing { addLog(.rendering, "[\(task.fileName)] Dubbing to \(options.targetLanguage)...") }
-        
+
         // Get transcript for dubbing (from stage 2)
         let transcriptText = lastTranscriptText
-        
-        let outputURL = await engine.renderOutput(source: task.sourceURL, options: options, transcript: transcriptText, progress: { [weak self] p in
+
+        let outputURL = await engine.renderOutput(source: task.sourceURL, options: options, transcript: transcriptText, backgroundAudio: stems?.background, progress: { [weak self] p in
             Task { @MainActor in if let idx = self?.tasks.firstIndex(where: { $0.id == task.id }) { self?.tasks[idx].progress = p } }
         })
-        
+
         guard let outputURL = outputURL else {
             await updateStatus(at: index, to: .failed, error: "Render failed")
             return
@@ -401,16 +428,23 @@ final class PipelineEngine {
     }
     
     // ── Audio extraction + whisper.cpp transcription ──
-    func transcribeAudio(_ url: URL, language: String = "auto") async -> TranscriptResult? {
+    /// Transcribe (and optionally translate-to-English) the dialogue of a media file.
+    /// - translateToEnglish: when true and the spoken language isn't English, whisper's
+    ///   built-in `-tr` flag emits English text directly. NOTE: whisper can only translate
+    ///   *to English* — it cannot translate into other target languages.
+    /// - audioInput: pre-extracted/separated audio (e.g. Demucs vocals.wav) to transcribe
+    ///   instead of pulling audio from the video. Improves accuracy on noisy sources.
+    func transcribeAudio(_ url: URL, language: String = "auto", translateToEnglish: Bool = false, audioInput: URL? = nil) async -> TranscriptResult? {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         let audioPath = tempDir.appendingPathComponent("audio.wav").path
         defer { try? FileManager.default.removeItem(at: tempDir) }
-        
-        // Extract audio with ffmpeg (16kHz mono WAV for whisper)
+
+        // Extract audio with ffmpeg (16kHz mono WAV for whisper). Source is the separated
+        // vocals stem when available, otherwise the original media's audio track.
         if let ffmpeg = ShellRunner.find("ffmpeg") {
             let extract = ShellRunner.run(ffmpeg, arguments: [
-                "-y", "-i", url.path,
+                "-y", "-i", (audioInput ?? url).path,
                 "-vn",
                 "-acodec", "pcm_s16le",
                 "-ar", "16000",
@@ -418,34 +452,39 @@ final class PipelineEngine {
                 "-t", "300", // First 5 minutes for language detection
                 audioPath
             ], timeout: 60)
-            
+
             if extract.exitCode != 0 {
                 return TranscriptResult(detectedLanguage: nil, text: "Audio extraction failed")
             }
         } else {
             return TranscriptResult(detectedLanguage: nil, text: "ffmpeg not found")
         }
-        
+
         // Transcribe with whisper-cpp
         guard let whisperCli = ShellRunner.find("whisper-cli") else {
             return TranscriptResult(detectedLanguage: nil, text: "whisper.cpp not installed — run: brew install whisper-cpp")
         }
-        
+
         // Find model
         let modelPath = findWhisperModel()
         guard let model = modelPath else {
             return TranscriptResult(detectedLanguage: nil, text: "No whisper model found. Download to ~/.mediatron/models/")
         }
-        
+
         let langArg = language == "auto" ? "auto" : language.lowercased()
-        let whisperResult = ShellRunner.run(whisperCli, arguments: [
+        var whisperArgs = [
             "-m", model,
             "-f", audioPath,
             "-l", langArg,
             "-oj",  // JSON output
             "-osrt", // SRT output
             "-of", tempDir.appendingPathComponent("transcript").path
-        ], timeout: 120)
+        ]
+        // Translate to English in-engine when requested and the source isn't already English.
+        if translateToEnglish && langArg != "en" {
+            whisperArgs.append("-tr")
+        }
+        let whisperResult = ShellRunner.run(whisperCli, arguments: whisperArgs, timeout: 600)
         
         // Read JSON output
         let jsonPath = tempDir.appendingPathComponent("transcript.json").path
@@ -462,6 +501,57 @@ final class PipelineEngine {
         return TranscriptResult(detectedLanguage: detected, text: output)
     }
     
+    // ── Demucs stem separation ──
+    struct Stems { let vocals: URL; let background: URL }
+
+    /// Split a media file's audio into a dialogue/vocals stem and a music+SFX background
+    /// stem using Demucs (`--two-stems vocals`). Returns nil if demucs is unavailable or
+    /// separation fails, so callers can fall back to using the full mix.
+    /// The returned files live in `persistentDir`, which the CALLER owns and must clean up.
+    func separateStems(_ url: URL, into persistentDir: URL) async -> Stems? {
+        guard let demucs = ShellRunner.find("demucs") else {
+            print("[Engine] demucs not installed — skipping stem separation")
+            return nil
+        }
+        guard let ffmpeg = ShellRunner.find("ffmpeg") else { return nil }
+
+        try? FileManager.default.createDirectory(at: persistentDir, withIntermediateDirectories: true)
+
+        // Demucs wants a real audio file; extract a 44.1k stereo WAV from the source first.
+        let inputWav = persistentDir.appendingPathComponent("input.wav")
+        let extract = ShellRunner.run(ffmpeg, arguments: [
+            "-y", "-i", url.path, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+            inputWav.path
+        ], timeout: 120)
+        guard extract.exitCode == 0, FileManager.default.fileExists(atPath: inputWav.path) else {
+            print("[Engine] stem-sep: audio extraction failed")
+            return nil
+        }
+
+        // Run demucs two-stems mode → <out>/htdemucs/input/{vocals,no_vocals}.wav
+        let outDir = persistentDir.appendingPathComponent("demucs_out")
+        let result = ShellRunner.run(demucs, arguments: [
+            "--two-stems", "vocals",
+            "-o", outDir.path,
+            inputWav.path
+        ], timeout: 1800) // demucs is slow on CPU; generous timeout
+
+        // Locate produced stems (model subdir name can vary, e.g. htdemucs)
+        let fm = FileManager.default
+        if let modelDirs = try? fm.contentsOfDirectory(at: outDir, includingPropertiesForKeys: nil) {
+            for modelDir in modelDirs {
+                let trackDir = modelDir.appendingPathComponent("input")
+                let vocals = trackDir.appendingPathComponent("vocals.wav")
+                let background = trackDir.appendingPathComponent("no_vocals.wav")
+                if fm.fileExists(atPath: vocals.path), fm.fileExists(atPath: background.path) {
+                    return Stems(vocals: vocals, background: background)
+                }
+            }
+        }
+        print("[Engine] stem-sep: demucs output not found (exit \(result.exitCode))")
+        return nil
+    }
+
     private func findWhisperModel() -> String? {
         let paths = [
             "\(NSHomeDirectory())/.mediatron/models/ggml-large-v3.bin",
@@ -543,10 +633,12 @@ final class PipelineEngine {
     }
     
     // ── ffmpeg-based output rendering (fixed: hardware encode, adaptive bitrate, no fake files) ──
-    func renderOutput(source: URL, options: ProcessingOptions, transcript: String = "", progress: @escaping (Double) -> Void) async -> URL? {
+    /// - backgroundAudio: optional Demucs music/SFX stem to mix UNDER the dubbed dialogue
+    ///   so the original score/effects are preserved instead of replaced.
+    func renderOutput(source: URL, options: ProcessingOptions, transcript: String = "", backgroundAudio: URL? = nil, progress: @escaping (Double) -> Void) async -> URL? {
         let name = source.deletingPathExtension().lastPathComponent
         let ext = options.outputFormat == .mp4 ? "mp4" : options.outputFormat == .mkv ? "mkv" : options.outputFormat == .mov ? "mov" : "webm"
-        
+
         // Determine output location
         let outputURL: URL
         if options.replaceOriginal {
@@ -557,47 +649,85 @@ final class PipelineEngine {
             outputURL = baseDir.appendingPathComponent("\(name)_dubbed.\(ext)")
         }
         try? FileManager.default.removeItem(at: outputURL)
-        
+
         guard let ffmpeg = ShellRunner.find("ffmpeg") else {
             print("[Engine] ffmpeg not found")
             return nil
         }
-        
-        // ── Real AI Upscaling with fx-upscale (Metal GPU) ──
-        // If AI Upscaler is enabled, upscale the source first using Metal GPU
+
+        // Scratch files produced by clean/upscale passes; removed at the end.
+        var scratch: [URL] = []
+        defer { for f in scratch { try? FileManager.default.removeItem(at: f) } }
+
         var workingSource = source
+
+        // ── Pre-pass: Stabilize (deshake) and/or Denoise (hqdn3d / nlmeans) ──
+        // Cleaning happens BEFORE upscaling so we don't amplify grain/shake into 4K.
+        if options.enableStabilization || options.enableDenoise {
+            progress(0.05)
+            var filters: [String] = []
+            if options.enableStabilization { filters.append("deshake") }
+            if options.enableDenoise {
+                // nlmeans is higher quality but slow; reserve it for studio quality.
+                filters.append(options.processingQuality == .studio ? "nlmeans" : "hqdn3d")
+            }
+            filters.append("format=yuv420p")
+            let cleaned = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString)_cleaned.mov")
+            let cleanResult = ShellRunner.run(ffmpeg, arguments: [
+                "-y", "-i", workingSource.path,
+                "-vf", filters.joined(separator: ","),
+                "-c:v", "hevc_videotoolbox", "-b:v", "20M", "-tag:v", "hvc1",
+                "-c:a", "copy",
+                cleaned.path
+            ], timeout: 1800)
+            if cleanResult.exitCode == 0, FileManager.default.fileExists(atPath: cleaned.path) {
+                workingSource = cleaned
+                scratch.append(cleaned)
+                print("[Engine] clean pre-pass succeeded (\(filters.joined(separator: ",")))")
+            } else {
+                print("[Engine] clean pre-pass failed: \(cleanResult.output.suffix(200))")
+            }
+            progress(0.12)
+        }
+
+        // ── Upscaling: MetalFX (fast) or Real-ESRGAN (slow, per-frame ML) ──
         if options.enableUpscaling {
             progress(0.15)
-            if let fxUpscale = ShellRunner.find("fx-upscale") {
-                let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
-                let targetH = options.upscaleTarget == .k8 ? 4320 : 2160
-                let tempUpscaled = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("\(UUID().uuidString)_upscaled.m4v")
-                
+            let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
+            let targetH = options.upscaleTarget == .k8 ? 4320 : 2160
+
+            if options.upscaleEngine == .realESRGAN,
+               let upscaled = await upscaleWithRealESRGAN(workingSource, targetWidth: targetW, scratch: &scratch, progress: progress) {
+                workingSource = upscaled
+                print("[Engine] Real-ESRGAN upscale succeeded → \(workingSource.lastPathComponent)")
+            } else if let fxUpscale = ShellRunner.find("fx-upscale") {
+                // MetalFX path (also the fallback if Real-ESRGAN was requested but failed).
                 let scaleResult = ShellRunner.run(fxUpscale, arguments: [
-                    source.path,
+                    workingSource.path,
                     "--width", "\(targetW)",
                     "--height", "\(targetH)",
                     "--codec", "h264"
-                ], timeout: 300)
-                
+                ], timeout: 600)
+
                 if scaleResult.exitCode == 0 {
-                    // fx-upscale outputs: source_Upscaled.mp4 in same directory
-                    let upscaledPath = source.deletingLastPathComponent()
-                        .appendingPathComponent("\(source.deletingPathExtension().lastPathComponent) Upscaled.mp4")
+                    // fx-upscale outputs: "<name> Upscaled.mp4" alongside its input.
+                    let upscaledPath = workingSource.deletingLastPathComponent()
+                        .appendingPathComponent("\(workingSource.deletingPathExtension().lastPathComponent) Upscaled.mp4")
                         .path
                     if FileManager.default.fileExists(atPath: upscaledPath) {
                         workingSource = URL(fileURLWithPath: upscaledPath)
+                        scratch.append(workingSource)
                         print("[Engine] fx-upscale succeeded → \(workingSource.lastPathComponent)")
                     }
                 } else {
                     print("[Engine] fx-upscale failed: \(scaleResult.output.prefix(200))")
                     // Fall through to ffmpeg lanczos as backup
                 }
-                progress(0.20)
             }
+            progress(0.20)
         }
-        
+
         // ── Probe source to get sensible bitrate ──
         var sourceBitrate: Int64 = 0
         if let probe = ShellRunner.find("ffprobe") {
@@ -640,27 +770,40 @@ final class PipelineEngine {
         
         // ── Build arguments ──
         var args: [String] = ["-y"]
-        
-        // Input: if dubbing with TTS audio, use dual input
+
+        // Input layout:
+        //   [0] working video
+        //   [1] dubbed TTS dialogue (if dubbing)
+        //   [2] background music/SFX stem (if stem-separated) → mixed under the dialogue
         let dubbedAudioPath = await findDubbedAudio(source: source, options: options, transcript: transcript)
-        var hasDubbedAudio = false
-        if let dubPath = dubbedAudioPath, options.enableDubbing {
-            args += ["-i", workingSource.path, "-i", dubPath.path]
-            hasDubbedAudio = true
-        } else {
-            args += ["-i", workingSource.path]
+        let hasDubbedAudio = options.enableDubbing && dubbedAudioPath != nil
+        let hasBackground = hasDubbedAudio && backgroundAudio != nil
+
+        args += ["-i", workingSource.path]
+        if let dubPath = dubbedAudioPath, hasDubbedAudio { args += ["-i", dubPath.path] }
+        if hasBackground, let bg = backgroundAudio { args += ["-i", bg.path] }
+
+        // Video filter: only add a lanczos scale fallback if upscaling was requested but
+        // neither Real-ESRGAN nor MetalFX changed the source (both unavailable/failed).
+        if options.enableUpscaling && workingSource == source {
+            let targetW = options.upscaleTarget == .k8 ? 7680 : 3840
+            let targetH = options.upscaleTarget == .k8 ? 4320 : 2160
+            args += ["-vf", "scale=\(targetW):\(targetH):flags=lanczos"]
+            print("[Engine] upscaler unavailable — using ffmpeg lanczos fallback")
         }
-        
-        // No ffmpeg scale filter needed — AI Upscaling was handled by fx-upscale above
-        
+
         // Video encoding
         args += ["-c:v", vCodec, "-b:v", outputBitrate, "-tag:v", vTag]
-        
+
         // Pixel format — videotoolbox needs explicit yuv420p for compatibility
         args += ["-pix_fmt", "yuv420p"]
-        
-        // Audio encoding — dubbed or copy
-        if hasDubbedAudio {
+
+        // Audio: mix dubbed dialogue over preserved background, dub-only, or copy original.
+        if hasBackground {
+            // amix the TTS dialogue (input 1) with the music/SFX bed (input 2).
+            args += ["-filter_complex", "[1:a][2:a]amix=inputs=2:duration=longest:weights=1 0.7[aout]"]
+            args += ["-map", "0:v:0", "-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+        } else if hasDubbedAudio {
             args += ["-c:a", "aac", "-b:a", "192k"]
             args += ["-map", "0:v:0", "-map", "1:a:0"]
         } else if options.enableDubbing {
@@ -668,7 +811,7 @@ final class PipelineEngine {
         } else {
             args += ["-c:a", "copy"]
         }
-        
+
         // Fast start for web playback
         args += ["-movflags", "+faststart"]
         
@@ -759,6 +902,83 @@ final class PipelineEngine {
             }
         }
         return 30.0
+    }
+
+    /// Frame-by-frame ML upscale with realesrgan-ncnn-vulkan.
+    /// HONEST NOTE: this is slow and disk-heavy — every frame is exported to PNG, upscaled
+    /// individually, then reassembled. Best for short clips / quality-critical work.
+    /// Returns a silent (video-only) intermediate; audio is muxed by the caller. nil on failure.
+    private func upscaleWithRealESRGAN(_ source: URL, targetWidth: Int, scratch: inout [URL], progress: @escaping (Double) -> Void) async -> URL? {
+        guard let realesrgan = ShellRunner.find("realesrgan-ncnn-vulkan"),
+              let ffmpeg = ShellRunner.find("ffmpeg") else {
+            print("[Engine] realesrgan or ffmpeg missing — cannot Real-ESRGAN upscale")
+            return nil
+        }
+        let modelDir = "\(NSHomeDirectory())/.mediatron/models/realesrgan"
+        guard FileManager.default.fileExists(atPath: "\(modelDir)/realesrgan-x4plus.bin") else {
+            print("[Engine] realesrgan model missing at \(modelDir)")
+            return nil
+        }
+
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)_resrgan")
+        let inFrames = work.appendingPathComponent("in")
+        let outFrames = work.appendingPathComponent("out")
+        try? FileManager.default.createDirectory(at: inFrames, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: outFrames, withIntermediateDirectories: true)
+        scratch.append(work)
+
+        // Capture source fps so the reassembled video plays at the right speed.
+        var fps = "24"
+        if let ffprobe = ShellRunner.find("ffprobe") {
+            let r = ShellRunner.run(ffprobe, arguments: [
+                "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", source.path
+            ], timeout: 10)
+            let raw = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !raw.isEmpty, raw != "0/0" { fps = raw }
+        }
+
+        // 1) Extract frames to PNG.
+        progress(0.16)
+        let extract = ShellRunner.run(ffmpeg, arguments: [
+            "-y", "-i", source.path, "\(inFrames.path)/frame_%06d.png"
+        ], timeout: 1800)
+        guard extract.exitCode == 0,
+              let frameCount = try? FileManager.default.contentsOfDirectory(atPath: inFrames.path).count,
+              frameCount > 0 else {
+            print("[Engine] realesrgan: frame extraction failed")
+            return nil
+        }
+
+        // 2) Upscale every frame (batch dir-mode; -s 4 = x4 model scale).
+        progress(0.30)
+        let up = ShellRunner.run(realesrgan, arguments: [
+            "-i", inFrames.path, "-o", outFrames.path,
+            "-n", "realesrgan-x4plus", "-m", modelDir, "-s", "4", "-f", "png"
+        ], timeout: 7200)
+        let producedCount = (try? FileManager.default.contentsOfDirectory(atPath: outFrames.path).count) ?? 0
+        guard up.exitCode == 0, producedCount > 0 else {
+            print("[Engine] realesrgan: upscale failed (exit \(up.exitCode))")
+            return nil
+        }
+        progress(0.55)
+
+        // 3) Reassemble frames at the original fps, scaled down to the exact target width
+        //    (model is fixed x4; scale corrects to the requested 4K/8K), even dims for yuv420p.
+        let outVideo = work.appendingPathComponent("upscaled_silent.mov")
+        let reassemble = ShellRunner.run(ffmpeg, arguments: [
+            "-y", "-framerate", fps, "-i", "\(outFrames.path)/frame_%06d.png",
+            "-vf", "scale=\(targetWidth):-2:flags=lanczos",
+            "-c:v", "hevc_videotoolbox", "-b:v", "40M", "-tag:v", "hvc1",
+            "-pix_fmt", "yuv420p",
+            outVideo.path
+        ], timeout: 3600)
+        guard reassemble.exitCode == 0, FileManager.default.fileExists(atPath: outVideo.path) else {
+            print("[Engine] realesrgan: reassembly failed")
+            return nil
+        }
+        progress(0.60)
+        return outVideo
     }
     
     /// Parse ffmpeg's stderr time= field for progress
@@ -886,14 +1106,17 @@ final class PipelineEngine {
         return dur > 0.1 // At least 100ms of valid media
     }
     
-    // ── CoreML Model Management ──
+    // ── Model / engine availability (honest: reports only what's really installed) ──
     func checkCoreMLModels() -> [String: Bool] {
         let modelDir = "\(NSHomeDirectory())/.mediatron/models"
+        // A real Real-ESRGAN model is tens of MB; guard against the 29-byte placeholder stubs.
+        let resrganModel = "\(modelDir)/realesrgan/realesrgan-x4plus.bin"
+        let resrganReal = ((try? FileManager.default.attributesOfItem(atPath: resrganModel)[.size] as? Int) ?? 0) > 1_000_000
         return [
-            "Real-ESRGAN (8K upscale)": FileManager.default.fileExists(atPath: "\(modelDir)/RealESRGAN.mlmodelc"),
-            "Wav2Lip (Lip-Sync)": FileManager.default.fileExists(atPath: "\(modelDir)/Wav2Lip.mlmodelc"),
-            "Bark (Voice Clone)": FileManager.default.fileExists(atPath: "\(modelDir)/Bark.mlmodelc"),
-            "Whisper (Speech)": findWhisperModel() != nil,
+            "Whisper (Speech/Translate)": findWhisperModel() != nil,
+            "Real-ESRGAN (upscale)": resrganReal && ShellRunner.find("realesrgan-ncnn-vulkan") != nil,
+            "Demucs (stem separation)": ShellRunner.find("demucs") != nil,
+            "MetalFX (fast upscale)": ShellRunner.find("fx-upscale") != nil,
         ]
     }
     
@@ -927,6 +1150,9 @@ struct DependencyBootstrapper {
         status["FFmpeg"] = ShellRunner.find("ffmpeg") != nil
         status["whisper.cpp"] = ShellRunner.find("whisper-cli") != nil
         status["ffprobe"] = ShellRunner.find("ffprobe") != nil
+        status["Demucs"] = ShellRunner.find("demucs") != nil
+        status["Real-ESRGAN"] = ShellRunner.find("realesrgan-ncnn-vulkan") != nil
+        status["MetalFX"] = ShellRunner.find("fx-upscale") != nil
         status["Homebrew"] = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew")
         return status
     }
@@ -934,37 +1160,32 @@ struct DependencyBootstrapper {
     static func bootstrap() async -> Bool {
         try? FileManager.default.createDirectory(atPath: mediatronBin, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(atPath: mediatronModels, withIntermediateDirectories: true)
-        
+
+        // Prefer the bundled setup script — it installs ALL engines (ffmpeg, whisper.cpp,
+        // whisper large-v3 model, Demucs+soundfile venv, Real-ESRGAN) idempotently and is the
+        // single source of truth for install logic. Falls back to inline brew installs below.
+        if let script = Bundle.main.path(forResource: "setup_engines", ofType: "sh") {
+            let r = ShellRunner.run("/bin/bash", arguments: [script], timeout: 3600)
+            if r.exitCode == 0 { return true }
+            print("[Bootstrap] setup_engines.sh exit \(r.exitCode): \(r.output.suffix(300))")
+        }
+
+        // ── Fallback: minimal inline installs for the core two engines ──
         let brewPath = "/opt/homebrew/bin/brew"
-        let hasBrew = FileManager.default.fileExists(atPath: brewPath)
-        
-        if !hasBrew {
-            // Install Homebrew
-            let process = Process()
-            process.launchPath = "/bin/bash"
-            process.arguments = ["-c", "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""]
-            try? process.run()
-            process.waitUntilExit()
+        if !FileManager.default.fileExists(atPath: brewPath) {
+            let p = Process()
+            p.launchPath = "/bin/bash"
+            p.arguments = ["-c", "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""]
+            try? p.run(); p.waitUntilExit()
         }
-        
-        // Install ffmpeg if missing
         if ShellRunner.find("ffmpeg") == nil {
-            let process = Process()
-            process.launchPath = brewPath
-            process.arguments = ["install", "ffmpeg", "--quiet"]
-            try? process.run()
-            process.waitUntilExit()
+            let p = Process(); p.launchPath = brewPath; p.arguments = ["install", "ffmpeg", "--quiet"]
+            try? p.run(); p.waitUntilExit()
         }
-        
-        // Install whisper-cpp if missing
         if ShellRunner.find("whisper-cli") == nil {
-            let process = Process()
-            process.launchPath = brewPath
-            process.arguments = ["install", "whisper-cpp", "--quiet"]
-            try? process.run()
-            process.waitUntilExit()
+            let p = Process(); p.launchPath = brewPath; p.arguments = ["install", "whisper-cpp", "--quiet"]
+            try? p.run(); p.waitUntilExit()
         }
-        
         return true
     }
 }

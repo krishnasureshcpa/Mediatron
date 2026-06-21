@@ -197,6 +197,9 @@ enum TaskStatus: String, Codable, CaseIterable {
     case translating = "Translating"
     case dubbing = "Dubbing"
     case detecting = "Detecting Language"
+    case separating = "Separating Stems"
+    case stabilizing = "Stabilizing"
+    case denoising = "Denoising"
     case lipSyncing = "Lip-Syncing"
     case upscaling = "Upscaling"
     case rendering = "Rendering"
@@ -213,6 +216,9 @@ enum TaskStatus: String, Codable, CaseIterable {
         case .translating: return "globe"
         case .dubbing: return "mic.fill"
         case .detecting: return "text.bubble.fill"
+        case .separating: return "waveform.path.ecg"
+        case .stabilizing: return "camera.metering.center.weighted"
+        case .denoising: return "wand.and.stars.inverse"
         case .lipSyncing: return "mouth.fill"
         case .upscaling: return "sparkles"
         case .rendering: return "gearshape.2.fill"
@@ -227,7 +233,8 @@ enum TaskStatus: String, Codable, CaseIterable {
         switch self {
         case .queued: return .secondary
         case .analyzing, .transcribing, .translating: return .blue
-        case .dubbing, .lipSyncing, .detecting: return .purple
+        case .dubbing, .lipSyncing, .detecting, .separating: return .purple
+        case .stabilizing, .denoising: return .cyan
         case .upscaling: return .orange
         case .rendering: return .indigo
         case .validating: return .teal
@@ -252,6 +259,10 @@ struct ProcessingOptions: Equatable {
     var subtitleMode: SubtitleMode = .softEmbedded
     var enableUpscaling: Bool = false
     var upscaleTarget: UpscaleTarget = .k4
+    var upscaleEngine: UpscaleEngine = .metalFX  // metalFX = fast Metal GPU; realESRGAN = slow per-frame ML, higher quality
+    var enableStabilization: Bool = false        // ffmpeg deshake — reduce camera shake/gate weave
+    var enableDenoise: Bool = false              // ffmpeg hqdn3d/nlmeans — remove grain/sensor noise
+    var enableStemSeparation: Bool = false       // Demucs — keep original music/SFX, replace only dialogue
     var outputFormat: OutputFormat = .mp4
     var preserveSourceDirectory: Bool = true
     var enableVoiceCloning: Bool = true
@@ -267,6 +278,10 @@ struct ProcessingOptions: Equatable {
     
     enum SubtitleMode: String, CaseIterable { case softEmbedded, hardBurned, externalSRT, none }
     enum UpscaleTarget: String, CaseIterable { case k4, k8 }
+    enum UpscaleEngine: String, CaseIterable {
+        case metalFX, realESRGAN
+        var label: String { self == .metalFX ? "MetalFX (fast)" : "Real-ESRGAN (slow)" }
+    }
     enum OutputFormat: String, CaseIterable { case mp4, mkv, mov, webm }
     enum ProcessingQuality: String, CaseIterable { case fast, balanced, studio }
 }
