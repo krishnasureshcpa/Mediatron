@@ -555,7 +555,13 @@ struct SidebarView: View {
                             Picker("", selection: $manager.options.upscaleTarget) {
                                 ForEach(ProcessingOptions.UpscaleTarget.allCases, id: \.self) { t in Text(t.rawValue).tag(t).font(.system(size: 10)) }
                             }.pickerStyle(.radioGroup).labelsHidden()
+                            Picker("", selection: $manager.options.upscaleEngine) {
+                                ForEach(ProcessingOptions.UpscaleEngine.allCases, id: \.self) { e in Text(e.label).tag(e).font(.system(size: 10)) }
+                            }.pickerStyle(.radioGroup).labelsHidden()
                         }
+                        Tog("Stabilize", $manager.options.enableStabilization, sub: "Reduce camera shake")
+                        Tog("Denoise", $manager.options.enableDenoise, sub: "Remove grain/sensor noise")
+                        Tog("Separate Stems", $manager.options.enableStemSeparation, sub: "Keep music/SFX, replace dialogue")
                         Tog("Noise Reduction", $manager.options.enableNoiseReduction)
                         Tog("Replace Original", $manager.options.replaceOriginal, sub: "Overwrite source file")
                         Tog("Integrity Check", $manager.options.enableIntegrityCheck, sub: "Validate output")
@@ -980,9 +986,12 @@ struct SettingsView: View {
                 Text("ENGINES").font(.system(size: 16, weight: .bold)).tracking(2).foregroundStyle(SX.textPrimary)
                 Text("100% on-device. No cloud.").font(.system(size: 10)).foregroundStyle(SX.textSecondary)
                 VStack(spacing: 6) {
-                    DRow(name: "FFmpeg v8.1", desc: "Video decode/encode", ok: manager.dependencyStatus["FFmpeg"] ?? false)
-                    DRow(name: "whisper.cpp v1.8", desc: "Speech-to-text", ok: manager.dependencyStatus["whisper.cpp"] ?? false)
+                    DRow(name: "FFmpeg", desc: "Video decode/encode + stabilize/denoise", ok: manager.dependencyStatus["FFmpeg"] ?? false)
+                    DRow(name: "whisper.cpp", desc: "Speech-to-text + translate→EN", ok: manager.dependencyStatus["whisper.cpp"] ?? false)
                     DRow(name: "ffprobe", desc: "Stream analysis", ok: manager.dependencyStatus["ffprobe"] ?? false)
+                    DRow(name: "Demucs", desc: "Dialogue / music+SFX separation", ok: manager.dependencyStatus["Demucs"] ?? false)
+                    DRow(name: "Real-ESRGAN", desc: "ML frame upscaling (slow, high quality)", ok: manager.dependencyStatus["Real-ESRGAN"] ?? false)
+                    DRow(name: "MetalFX", desc: "Fast GPU upscaling", ok: manager.dependencyStatus["MetalFX"] ?? false)
                 }
                 Button {
                     checking = true
