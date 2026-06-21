@@ -82,6 +82,8 @@ final class MediaProcessingManager: ObservableObject {
     
     private let engine = PipelineEngine()
     private var cancellables = Set<AnyCancellable>()
+    /// Transcript text from the last transcription, used for dubbing
+    private var lastTranscriptText: String = ""
     
     func addFiles(_ urls: [URL]) {
         for url in urls {
@@ -205,6 +207,7 @@ final class MediaProcessingManager: ObservableObject {
             addLog(.transcribing, "[\(task.fileName)] Speech-to-text...")
             if let transcript = await engine.transcribeAudio(task.sourceURL, language: info.audioLanguage ?? "auto") {
                 if let lang = transcript.detectedLanguage { await updateLang(at: index, language: lang) }
+                lastTranscriptText = transcript.text
                 addLog(.transcribing, "[\(task.fileName)] \(transcript.detectedLanguage ?? "?") — \(transcript.text.prefix(60))...")
             }
         }
@@ -215,7 +218,10 @@ final class MediaProcessingManager: ObservableObject {
         if options.enableUpscaling { addLog(.rendering, "[\(task.fileName)] Upscaling to \(options.upscaleTarget.rawValue)...") }
         if options.enableDubbing { addLog(.rendering, "[\(task.fileName)] Dubbing to \(options.targetLanguage)...") }
         
-        let outputURL = await engine.renderOutput(source: task.sourceURL, options: options, progress: { [weak self] p in
+        // Get transcript for dubbing (from stage 2)
+        let transcriptText = lastTranscriptText
+        
+        let outputURL = await engine.renderOutput(source: task.sourceURL, options: options, transcript: transcriptText, progress: { [weak self] p in
             Task { @MainActor in if let idx = self?.tasks.firstIndex(where: { $0.id == task.id }) { self?.tasks[idx].progress = p } }
         })
         
@@ -537,7 +543,7 @@ final class PipelineEngine {
     }
     
     // ── ffmpeg-based output rendering (fixed: hardware encode, adaptive bitrate, no fake files) ──
-    func renderOutput(source: URL, options: ProcessingOptions, progress: @escaping (Double) -> Void) async -> URL? {
+    func renderOutput(source: URL, options: ProcessingOptions, transcript: String = "", progress: @escaping (Double) -> Void) async -> URL? {
         let name = source.deletingPathExtension().lastPathComponent
         let ext = options.outputFormat == .mp4 ? "mp4" : options.outputFormat == .mkv ? "mkv" : options.outputFormat == .mov ? "mov" : "webm"
         
@@ -633,7 +639,17 @@ final class PipelineEngine {
         }
         
         // ── Build arguments ──
-        var args: [String] = ["-y", "-i", workingSource.path]
+        var args: [String] = ["-y"]
+        
+        // Input: if dubbing with TTS audio, use dual input
+        let dubbedAudioPath = await findDubbedAudio(source: source, options: options, transcript: transcript)
+        var hasDubbedAudio = false
+        if let dubPath = dubbedAudioPath, options.enableDubbing {
+            args += ["-i", workingSource.path, "-i", dubPath.path]
+            hasDubbedAudio = true
+        } else {
+            args += ["-i", workingSource.path]
+        }
         
         // No ffmpeg scale filter needed — AI Upscaling was handled by fx-upscale above
         
@@ -643,8 +659,11 @@ final class PipelineEngine {
         // Pixel format — videotoolbox needs explicit yuv420p for compatibility
         args += ["-pix_fmt", "yuv420p"]
         
-        // Audio encoding
-        if options.enableDubbing {
+        // Audio encoding — dubbed or copy
+        if hasDubbedAudio {
+            args += ["-c:a", "aac", "-b:a", "192k"]
+            args += ["-map", "0:v:0", "-map", "1:a:0"]
+        } else if options.enableDubbing {
             args += ["-c:a", "aac", "-b:a", "192k"]
         } else {
             args += ["-c:a", "copy"]
@@ -759,6 +778,104 @@ final class PipelineEngine {
             progress(p)
         }
     }
+    
+    // ── Apple Neural TTS Dubbing Engine ──
+    /// Map ISO 639-1 language code to a macOS `say` voice name
+    private static let voiceMap: [String: String] = [
+        "en": "Samantha",       // English (US) — female
+        "es": "Eddy (Spanish (Spain))",  // Spanish — male
+        "fr": "Eddy (French (France))",  // French — male
+        "de": "Anna",           // German — female
+        "it": "Alice",          // Italian — female
+        "pt": "Eddy (Portuguese (Brazil))", // Portuguese — male
+        "ja": "Kyoko",          // Japanese — female
+        "ko": "Yuna",           // Korean — female
+        "zh": "Tingting",       // Chinese (Mandarin) — female
+        "ar": "Maged",          // Arabic — male
+        "nl": "Ellen",          // Dutch — female
+        "pl": "Zosia",          // Polish — female
+        "tr": "Aylin",          // Turkish — female
+        "ru": "Milena",         // Russian — female
+        "sv": "Alva",           // Swedish — female
+        "da": "Ida",            // Danish — female
+        "fi": "Satu",           // Finnish — female
+        "nb": "Nora",           // Norwegian — female
+        "cs": "Zuzana",         // Czech — female
+        "hu": "Matyi",          // Hungarian — male
+        "ro": "Ioana",          // Romanian — female
+        "el": "Melina",         // Greek — female
+        "he": "Carmit",         // Hebrew — female
+        "hi": "Lekha",          // Hindi — female
+        "th": "Kanya",          // Thai — female
+        "vi": "Linh",           // Vietnamese — female
+        "id": "Damayanti",      // Indonesian — female
+        "ms": "Rizwan",         // Malay — male
+        "ta": "Vani",           // Tamil — female
+        "te": "Chitra",         // Telugu — female
+        "mr": "Mandar",         // Marathi — male
+        "gu": "Nandini",        // Gujarati — female
+        "kn": "Anu",            // Kannada — female
+        "ml": "Sobha",          // Malayalam — female
+        "ur": "Zara",           // Urdu — female
+        "bn": "Puja",           // Bengali — female
+    ]
+    
+    /// Find the macOS voice name for a given ISO 639-1 code
+    private func voiceForLanguage(_ code: String) -> String {
+        let base = String(code.prefix(2)).lowercased()
+        return Self.voiceMap[base] ?? "Samantha" // fallback to English
+    }
+    
+    /// Generate dubbed audio using Apple's Neural TTS (`say` command).
+    /// Takes transcribed text and target language, outputs AIFF file.
+    /// Returns URL to the generated audio file, or nil on failure.
+    private func generateDubbedAudio(text: String, targetLanguage: String) -> URL? {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        
+        let voice = voiceForLanguage(targetLanguage)
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)_dub.aiff")
+        
+        // Truncate very long text to avoid excessive TTS time
+        let maxChars = 10000
+        let truncatedText = String(text.prefix(maxChars))
+        
+        let process = Process()
+        process.launchPath = "/usr/bin/say"
+        process.arguments = ["-v", voice, "-o", outputURL.path, truncatedText]
+        process.qualityOfService = .userInitiated
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            print("[Engine] say command failed: \(error.localizedDescription)")
+            return nil
+        }
+        
+        guard process.terminationStatus == 0,
+              FileManager.default.fileExists(atPath: outputURL.path) else {
+            print("[Engine] say command returned error")
+            return nil
+        }
+        
+        return outputURL
+    }
+    
+    /// Find or generate dubbed audio for a source + options.
+    /// Returns URL to AIFF file if successful, nil if dubbing disabled or fails.
+    func findDubbedAudio(source: URL, options: ProcessingOptions, transcript: String = "") async -> URL? {
+        guard options.enableDubbing else { return nil }
+        
+        // Use the passed transcript, or fallback to lastTranscriptText
+        let text = transcript.isEmpty ? lastTranscriptText : transcript
+        guard !text.isEmpty else { return nil }
+        
+        return generateDubbedAudio(text: text, targetLanguage: options.targetLanguage)
+    }
+    
+    /// Holds the last transcript text set from the pipeline for dubbing
+    var lastTranscriptText: String = ""
     
     func runIntegrityCheck(source: URL, output: URL) -> Bool {
         guard let ffprobe = ShellRunner.find("ffprobe") else { return true }
